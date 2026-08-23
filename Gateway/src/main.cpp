@@ -10,22 +10,46 @@ const char* WIFI_PASSWORD = "ngengenge";
 const char* DATABASE_URL = "https://isk-project-9501f-default-rtdb.firebaseio.com";
 const unsigned long FIREBASE_READ_INTERVAL = 2000;
 
-uint8_t doorlockAddress[] = { 0x14, 0x63, 0x93, 0x8D, 0xA2, 0x84 };
-
 typedef struct {
   char message[32];
 } DoorCommand;
 
 DoorCommand outgoingCommand;
-DoorCommand incomingStatus;
+DoorCommand incomingData;
 
 unsigned long lastFirebaseRead = 0;
 char lastCommand[32] = "";
 
-void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
-  memcpy(&incomingStatus, incomingData, sizeof(incomingStatus));
+uint8_t doorlockAddress[6] = {0};
+volatile bool paired = false;
+
+void sendAck(const uint8_t *mac_addr) {
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, mac_addr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  DoorCommand ack;
+  memset(&ack, 0, sizeof(ack));
+  strcpy(ack.message, "GATEWAY_ACK");
+  esp_now_send(mac_addr, (uint8_t*)&ack, sizeof(ack));
+}
+
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingBytes, int len) {
+  memcpy(&incomingData, incomingBytes, sizeof(incomingData));
+
+  if (!paired) {
+    if (strcmp(incomingData.message, "DOORLOCK_HELLO") == 0) {
+      memcpy(doorlockAddress, mac_addr, 6);
+      sendAck(mac_addr);
+      paired = true;
+    }
+    return;
+  }
+
   Serial.print("Status dari Doorlock: ");
-  Serial.println(incomingStatus.message);
+  Serial.println(incomingData.message);
 }
 
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -55,7 +79,7 @@ void checkFirebaseCommand() {
           strcmp(command, lastCommand) != 0) {
         strncpy(lastCommand, command, sizeof(lastCommand) - 1);
 
-        Serial.print("Command baru dari Firebase: ");
+        Serial.print("Status Firebase berubah: ");
         Serial.println(command);
 
         sendDoorCommand(command);
@@ -72,9 +96,26 @@ void checkFirebaseCommand() {
   http.end();
 }
 
-void setup() {
-  Serial.begin(115200);
+void pairing() {
+  Serial.println("Pairing...");
 
+  unsigned long lastPrint = millis();
+  while (!paired) {
+    if (millis() - lastPrint >= 1000) {
+      lastPrint = millis();
+      Serial.println("Pairing...");
+    }
+    delay(10);
+  }
+
+  Serial.printf(
+    "Pairing selesai, Doorlock: %02X:%02X:%02X:%02X:%02X:%02X\n",
+    doorlockAddress[0], doorlockAddress[1], doorlockAddress[2],
+    doorlockAddress[3], doorlockAddress[4], doorlockAddress[5]
+  );
+}
+
+void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -84,8 +125,35 @@ void setup() {
     delay(500);
   }
   Serial.println();
-  Serial.print("WiFi tersambung, IP: ");
+  Serial.print("WiFi terhubung, IP: ");
   Serial.println(WiFi.localIP());
+}
+
+void connectFirebase() {
+  Serial.print("Menghubungkan ke Firebase");
+
+  int httpCode;
+  do {
+    HTTPClient http;
+    http.begin(String(DATABASE_URL) + "/Doorlock.json");
+    httpCode = http.GET();
+    http.end();
+
+    if (httpCode != HTTP_CODE_OK) {
+      Serial.print(".");
+      delay(500);
+    }
+  } while (httpCode != HTTP_CODE_OK);
+
+  Serial.println();
+  Serial.println("Firebase terhubung");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  connectWiFi();
+  connectFirebase();
 
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init gagal");
@@ -95,14 +163,7 @@ void setup() {
   esp_now_register_recv_cb(OnDataRecv);
   esp_now_register_send_cb(OnDataSent);
 
-  esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, doorlockAddress, 6);
-  peerInfo.channel = 0;
-  peerInfo.encrypt = false;
-
-  esp_err_t result = esp_now_add_peer(&peerInfo);
-  Serial.print("Doorlock Peer: ");
-  Serial.println(result == ESP_OK || result == ESP_ERR_ESPNOW_EXIST ? "OK" : "GAGAL");
+  pairing();
 }
 
 void loop() {
