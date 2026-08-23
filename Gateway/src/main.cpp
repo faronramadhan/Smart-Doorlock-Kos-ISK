@@ -1,265 +1,117 @@
+#include <Arduino.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <esp_now.h>
-
-// ========================================
-// WIFI
-// ========================================
 
 const char* WIFI_SSID = "Nge";
 const char* WIFI_PASSWORD = "ngengenge";
 
-// ========================================
-// ESP32-C3 MAC
-// ========================================
+const char* DATABASE_URL = "https://isk-project-9501f-default-rtdb.firebaseio.com";
+const unsigned long FIREBASE_READ_INTERVAL = 2000;
 
-uint8_t doorlockAddress[] =
-{
-  0x14,
-  0x63,
-  0x93,
-  0x8D,
-  0xA2,
-  0x84
-};
+uint8_t doorlockAddress[] = { 0x14, 0x63, 0x93, 0x8D, 0xA2, 0x84 };
 
-// ========================================
-// DATA STRUCTURE
-// ========================================
-
-typedef struct
-{
+typedef struct {
   char message[32];
-} TestData;
+} DoorCommand;
 
-TestData sendData;
-TestData receivedData;
+DoorCommand outgoingCommand;
+DoorCommand incomingStatus;
 
-// ========================================
-// RECEIVE CALLBACK
-// ========================================
+unsigned long lastFirebaseRead = 0;
+char lastCommand[32] = "";
 
-void OnDataRecv(
-  const esp_now_recv_info_t *info,
-  const uint8_t *incomingData,
-  int len)
-{
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("          ACK FROM ESP32-C3");
-  Serial.println("========================================");
-
-  memcpy(
-    &receivedData,
-    incomingData,
-    sizeof(receivedData)
-  );
-
-  Serial.print("Message : ");
-  Serial.println(receivedData.message);
-
-  Serial.println("========================================");
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
+  memcpy(&incomingStatus, incomingData, sizeof(incomingStatus));
+  Serial.print("Status dari Doorlock: ");
+  Serial.println(incomingStatus.message);
 }
 
-// ========================================
-// SEND CALLBACK
-// ========================================
-
-void OnDataSent(
-  const wifi_tx_info_t *tx_info,
-  esp_now_send_status_t status)
-{
-  Serial.print("Gateway Delivery: ");
-
-  if (status == ESP_NOW_SEND_SUCCESS)
-  {
-    Serial.println("SUCCESS");
-  }
-  else
-  {
-    Serial.println("FAILED");
-  }
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Kirim ke Doorlock: SUKSES" : "Kirim ke Doorlock: GAGAL");
 }
 
-// ========================================
-// SEND TEST
-// ========================================
-
-void sendTest()
-{
-  memset(
-    &sendData,
-    0,
-    sizeof(sendData)
-  );
-
-  strcpy(
-    sendData.message,
-    "HELLO_FROM_GATEWAY"
-  );
-
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("          SEND TO ESP32-C3");
-  Serial.println("========================================");
-
-  Serial.print("Message : ");
-  Serial.println(sendData.message);
-
-  esp_err_t result =
-    esp_now_send(
-      doorlockAddress,
-      (uint8_t*)&sendData,
-      sizeof(sendData)
-    );
-
-  Serial.print("Send Result: ");
-
-  if (result == ESP_OK)
-  {
-    Serial.println("ESP_OK");
-  }
-  else
-  {
-    Serial.print("FAILED ");
-    Serial.println(result);
-  }
+void sendDoorCommand(const char* command) {
+  memset(&outgoingCommand, 0, sizeof(outgoingCommand));
+  strncpy(outgoingCommand.message, command, sizeof(outgoingCommand.message) - 1);
+  esp_now_send(doorlockAddress, (uint8_t*)&outgoingCommand, sizeof(outgoingCommand));
 }
 
-// ========================================
-// SETUP
-// ========================================
+void checkFirebaseCommand() {
+  HTTPClient http;
+  http.begin(String(DATABASE_URL) + "/Doorlock.json");
 
-void setup()
-{
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, http.getString());
+
+    if (!error) {
+      const char* command = doc["Control"]["command"] | "";
+
+      if ((strcmp(command, "LOCK") == 0 || strcmp(command, "UNLOCK") == 0) &&
+          strcmp(command, lastCommand) != 0) {
+        strncpy(lastCommand, command, sizeof(lastCommand) - 1);
+
+        Serial.print("Command baru dari Firebase: ");
+        Serial.println(command);
+
+        sendDoorCommand(command);
+      }
+    } else {
+      Serial.print("JSON parse error: ");
+      Serial.println(error.c_str());
+    }
+  } else {
+    Serial.print("Firebase GET gagal: ");
+    Serial.println(httpCode);
+  }
+
+  http.end();
+}
+
+void setup() {
   Serial.begin(115200);
 
-  delay(3000);
-
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("        ESP32 GATEWAY TWO WAY TEST");
-  Serial.println("========================================");
-
-  // ======================================
-  // WIFI
-  // ======================================
-
   WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
-  );
-
-  Serial.print("Connecting");
-
-  while (
-    WiFi.status() != WL_CONNECTED
-  )
-  {
+  Serial.print("Menghubungkan ke WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(500);
   }
-
   Serial.println();
-
-  Serial.println("WiFi Connected!");
-
-  Serial.print("IP      : ");
+  Serial.print("WiFi tersambung, IP: ");
   Serial.println(WiFi.localIP());
 
-  Serial.print("Channel : ");
-  Serial.println(WiFi.channel());
-
-  Serial.print("MAC     : ");
-  Serial.println(WiFi.macAddress());
-
-  // ======================================
-  // ESP-NOW
-  // ======================================
-
-  if (
-    esp_now_init() != ESP_OK
-  )
-  {
-    Serial.println(
-      "ESP-NOW INIT FAILED"
-    );
-
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init gagal");
     return;
   }
 
-  Serial.println(
-    "ESP-NOW INIT SUCCESS"
-  );
-
-  // ======================================
-  // CALLBACK
-  // ======================================
-
-  esp_now_register_recv_cb(
-    OnDataRecv
-  );
-
-  esp_now_register_send_cb(
-    OnDataSent
-  );
-
-  // ======================================
-  // ADD C3 PEER
-  // ======================================
+  esp_now_register_recv_cb(OnDataRecv);
+  esp_now_register_send_cb(OnDataSent);
 
   esp_now_peer_info_t peerInfo = {};
-
-  memcpy(
-    peerInfo.peer_addr,
-    doorlockAddress,
-    6
-  );
-
+  memcpy(peerInfo.peer_addr, doorlockAddress, 6);
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
 
-  esp_err_t result =
-    esp_now_add_peer(
-      &peerInfo
-    );
-
-  Serial.print("C3 Peer: ");
-
-  if (result == ESP_OK)
-  {
-    Serial.println("ADDED");
-  }
-  else if (
-    result == ESP_ERR_ESPNOW_EXIST
-  )
-  {
-    Serial.println("ALREADY EXISTS");
-  }
-  else
-  {
-    Serial.print("FAILED ");
-    Serial.println(result);
-  }
-
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("Gateway Ready");
-  Serial.println("========================================");
-
-  delay(3000);
-
-  sendTest();
+  esp_err_t result = esp_now_add_peer(&peerInfo);
+  Serial.print("Doorlock Peer: ");
+  Serial.println(result == ESP_OK || result == ESP_ERR_ESPNOW_EXIST ? "OK" : "GAGAL");
 }
 
-// ========================================
-// LOOP
-// ========================================
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
 
-void loop()
-{
-  delay(5000);
-
-  sendTest();
+  if (millis() - lastFirebaseRead >= FIREBASE_READ_INTERVAL) {
+    lastFirebaseRead = millis();
+    checkFirebaseCommand();
+  }
 }

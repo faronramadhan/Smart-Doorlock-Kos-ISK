@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "Doorlock",
+			"path": "Doorlock"
+		},
+		{
+			"name": "Gateway",
+			"path": "Gateway"
+		}
+	],
+	"settings": {}
+}
