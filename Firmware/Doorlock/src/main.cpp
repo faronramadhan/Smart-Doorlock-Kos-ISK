@@ -89,6 +89,7 @@ void setup() {
   digitalWrite(DRV_SLEEP, doorLocked ? LOW : HIGH);
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
 
   Serial.print("MAC Address : ");
   Serial.println(WiFi.macAddress());

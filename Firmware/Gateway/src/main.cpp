@@ -127,6 +127,8 @@ void connectWiFi() {
   Serial.println();
   Serial.print("WiFi terhubung, IP: ");
   Serial.println(WiFi.localIP());
+
+  WiFi.setSleep(false);
 }
 
 void connectFirebase() {

@@ -1,12 +1,16 @@
 {
 	"folders": [
 		{
-			"name": "Doorlock",
-			"path": "Doorlock"
+			"name": "Smart-Doorlock-Kos-ISK",
+			"path": "."
 		},
 		{
-			"name": "Gateway",
-			"path": "Gateway"
+			"name": "Firmware-Doorlock",
+			"path": "Firmware/Doorlock"
+		},
+		{
+			"name": "Firmware-Gateway",
+			"path": "Firmware/Gateway"
 		}
 	],
 	"settings": {}
