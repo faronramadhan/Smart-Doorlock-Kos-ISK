@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "Smart-Doorlock-Kos-ISK",
+			"path": "."
+		},
+		{
+			"name": "Firmware-Doorlock",
+			"path": "Firmware/Doorlock"
+		},
+		{
+			"name": "Firmware-Gateway",
+			"path": "Firmware/Gateway"
+		}
+	],
+	"settings": {}
+}
