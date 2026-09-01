@@ -1,0 +1,41 @@
+{
+  "head": {
+    "docType": "2",
+    "editorVersion": "6.5.57",
+    "newgId": true,
+    "c_para": {
+      "name": "Mini560-SMD",
+      "package": "MINI560-SMD",
+      "pre": "U?",
+      "Manufacturer": "",
+      "Manufacturer Part": "",
+      "Supplier Part": "",
+      "Supplier": "",
+      "link": "",
+      "Contributor": "Raul78"
+    },
+    "c_spiceCmd": null,
+    "hasIdFlag": true,
+    "x": 400,
+    "y": 300,
+    "uuid": "4e5643a1ad484b079d325f5ce8e747e1",
+    "utime": 1674035461,
+    "puuid": "9a7fa8bbf34f4257a468ebefda26e391",
+    "importFlag": 0
+  },
+  "canvas": "CA~1000~1000~#FFFFFF~yes~#CCCCCC~10~1000~1000~line~10~pixel~5~400~300",
+  "shape": [
+    "R~400~250~~~80~50~#000000~1~0~none~gge7~0~",
+    "P~show~4~1~390~260~180~gge10~0^^390~260^^M 390 260 h 10~#880000^^1~402~263~0~In+~start~~~#0000FF^^0~400~259~0~1~end~~~#0000FF^^0~397~260^^0~M 400 263 L 403 260 L 400 257",
+    "P~show~4~2~390~290~180~gge31~0^^390~290^^M 390 290 h 10~#880000^^1~402~293~0~In-~start~~~#0000FF^^0~400~289~0~2~end~~~#0000FF^^0~397~290^^0~M 400 293 L 403 290 L 400 287",
+    "P~show~4~4~490~260~0~gge52~0^^490~260^^M 490 260 h -10~#880000^^1~478~263~0~Out+~end~~~#0000FF^^0~480~259~0~4~start~~~#0000FF^^0~483~260^^0~M 480 257 L 477 260 L 480 263",
+    "P~show~4~3~490~290~0~gge73~0^^490~290^^M 490 290 h -10~#880000^^1~478~293~0~Out-~end~~~#0000FF^^0~480~289~0~3~start~~~#0000FF^^0~483~290^^0~M 480 287 L 477 290 L 480 293"
+  ],
+  "BBox": {
+    "x": 389,
+    "y": 250,
+    "width": 102,
+    "height": 50
+  },
+  "colors": {}
+}

@@ -1444,9 +1444,9 @@
 			(in_pos_files yes)
 			(duplicate_pin_numbers_are_jumpers no)
 			(property "Reference" "U?"
-				(at 10.16 6.35 0)
+				(at 10.16 17.78 0)
 				(show_name no)
-				(do_not_autoplace yes)
+				(do_not_autoplace no)
 				(effects
 					(font
 						(size 1.27 1.27)
@@ -1459,9 +1459,7 @@
 				(do_not_autoplace no)
 				(effects
 					(font
-						(face "KiCad Font")
 						(size 1.27 1.27)
-						(color 0 0 0 1)
 					)
 				)
 			)
