@@ -1,49 +1,69 @@
 # AGENTS.md
 
-Aturan main buat AI agent (Claude, Copilot, dst) yang kerja di repo ini.
+Dokumen ini berisi aturan kerja bagi setiap agen kecerdasan buatan (AI agent) — termasuk namun tidak terbatas pada Claude, GitHub Copilot, Cursor, atau agen sejenis lainnya — yang beroperasi di dalam repositori ini. Aturan ini mengikat terlepas dari platform atau vendor agen yang digunakan.
 
-## Prinsip Utama
+## 1. Tujuan
 
-**Pahami dulu, baru eksekusi.** Kalau user cuma minta "cek", "pelajarin", "jelasin", "liat", atau "review" sesuatu — itu artinya **baca & analisis**, bukan izin buat langsung jalanin command, generate file, atau ubah apapun.
+Dokumen ini menetapkan prinsip dan prosedur kerja standar agar agen AI:
 
-Jangan asumsi "biar cepet kelar" = "langsung eksekusi". Kalau ragu antara *analisis* atau *eksekusi*, defaultnya selalu ke analisis dulu.
+1. Memahami maksud dan konteks permintaan pengguna secara menyeluruh sebelum bertindak.
+2. Tidak melakukan eksekusi (perintah, perubahan berkas, atau pemanggilan alat eksternal) tanpa dasar yang jelas.
+3. Mengomunikasikan rencana tindakan kepada pengguna sebelum mengeksekusinya, khususnya untuk aksi yang berdampak atau tidak dapat dibatalkan dengan mudah.
 
-## Alur Kerja yang Diharapkan
+## 2. Prinsip Utama
 
-1. **Analisis permintaan** — pahami apa yang sebenernya user mau. "Cek file X" beda sama "benerin file X" beda lagi sama "jalanin X".
-2. **Pahami konteks** — baca file/kode yang relevan dulu sebelum nyimpulkan atau ngasih saran. Jangan asal generate jawaban dari tebakan.
-3. **Kalau butuh eksekusi** (jalanin CLI tool, build, generate artifact, ubah file, install package, dll) — **tawarin dulu ke user**: jelasin apa yang mau dijalanin, kenapa, dan apa efeknya. Tunggu konfirmasi.
-4. **Eksekusi setelah dikonfirmasi**, dan beresin/bersihin artifact sementara yang dibikin selama proses (misal file report/export yang cuma dipake buat analisis) — jangan nyampah ke working directory.
+| No. | Prinsip | Penjelasan |
+|-----|---------|------------|
+| 2.1 | **Pahami sebelum bertindak** | Permintaan seperti "cek", "pelajari", "jelaskan", "lihat", atau "review" berarti membaca dan menganalisis, bukan izin untuk mengeksekusi perintah, membuat berkas, atau mengubah apa pun. |
+| 2.2 | **Analisis adalah default** | Jika terdapat keraguan antara menganalisis atau mengeksekusi suatu permintaan, agen wajib memilih untuk menganalisis terlebih dahulu. |
+| 2.3 | **Efisiensi bukan alasan untuk mengeksekusi tanpa izin** | Anggapan bahwa eksekusi langsung akan "mempercepat penyelesaian tugas" tidak menggugurkan kewajiban untuk memahami konteks dan meminta konfirmasi terlebih dahulu. |
+| 2.4 | **Transparansi tindakan** | Setiap rencana eksekusi harus disampaikan secara eksplisit kepada pengguna: apa yang akan dijalankan, mengapa diperlukan, dan apa dampaknya. |
 
-## Kapan Boleh Langsung Jalan (Tanpa Nanya Dulu)
+## 3. Alur Kerja Standar
 
-Aksi yang **read-only & gak ninggalin jejak** boleh langsung dilakuin tanpa nawarin dulu:
+Setiap permintaan pengguna wajib diproses melalui tahapan berikut, secara berurutan:
 
-- Baca file (`Read`, `cat`, buka & liat isi file)
-- Cari/grep isi file atau struktur folder
-- `git status`, `git diff`, `git log` (liat-liat doang, gak ubah apapun)
+1. **Analisis Permintaan** — Identifikasi maksud sebenarnya dari permintaan pengguna. Permintaan "periksa berkas X" berbeda dengan "perbaiki berkas X", dan berbeda pula dengan "jalankan X".
+2. **Pahami Konteks** — Baca berkas, kode, atau dokumentasi terkait sebelum menarik kesimpulan atau memberikan rekomendasi. Kesimpulan tidak boleh didasarkan pada asumsi atau tebakan.
+3. **Ajukan Rencana Eksekusi (bila diperlukan)** — Apabila tugas memerlukan eksekusi (menjalankan alat baris perintah, proses build, pembuatan berkas, instalasi paket, dan sejenisnya), agen wajib menjelaskan rencana tersebut kepada pengguna dan menunggu konfirmasi sebelum melanjutkan.
+4. **Eksekusi dan Pembersihan** — Setelah memperoleh konfirmasi, agen dapat mengeksekusi rencana tersebut. Berkas atau artefak sementara yang dihasilkan semata-mata untuk keperluan analisis (misalnya berkas laporan atau hasil ekspor) wajib dibersihkan setelah tidak lagi diperlukan, agar tidak meninggalkan jejak pada direktori kerja.
 
-## Kapan Harus Nanya/Nawarin Dulu
+## 4. Klasifikasi Aksi
 
-Aksi yang **ninggalin jejak, ubah state, atau butuh tool eksternal** wajib ditawarin dulu ke user sebelum dijalanin:
+### 4.1 Aksi yang Dapat Dilakukan Tanpa Konfirmasi
 
-- Jalanin CLI/tool eksternal (contoh: `kicad-cli`, compiler, script build)
-- Generate file baru (report, export, netlist, dll) — meskipun cuma buat "ngebantu analisis"
-- Edit/tulis/hapus file apapun di repo
-- `git add`, `git commit`, `git push`, atau operasi git lain yang ngubah state
-- Install/uninstall dependency atau package
+Aksi bersifat *read-only* (hanya membaca, tidak mengubah keadaan apa pun) dapat dilakukan secara langsung tanpa perlu menawarkan terlebih dahulu:
 
-Kalau kepaksa harus eksekusi buat bisa jawab pertanyaan analisis (misal: perlu jalanin tool buat "baca" struktur file biner/proprietary), **tetep tawarin dulu** dan jelasin kenapa itu perlu, kecuali user udah eksplisit bilang "gas" / "langsung aja" / kasih izin di awal.
+- Membaca isi berkas.
+- Mencari (grep/search) isi berkas atau struktur direktori.
+- Memeriksa status version control yang bersifat non-destruktif, seperti `git status`, `git diff`, dan `git log`.
 
-## Konteks Project
+### 4.2 Aksi yang Wajib Dikonfirmasi Terlebih Dahulu
 
-Project **Smart Doorlock Kos ISK** — sistem doorlock pintar berbasis ESP32-C3, dikontrol via ESP-NOW & Firebase, terdiri dari:
+Aksi yang mengubah keadaan repositori, meninggalkan artefak baru, atau memerlukan alat eksternal wajib ditawarkan dan dikonfirmasi terlebih dahulu oleh pengguna sebelum dijalankan:
 
-- **`Hardware/`** — desain elektronik (KiCad): schematic & PCB buat modul Doorlock (ESP32-C3 + DRV8833 motor driver + Mini560 buck converter) dan Gateway.
-- **`Firmware/`** — kode firmware ESP32 (PlatformIO).
-- **`Document/`** — dokumentasi project, termasuk [Git Dictionary](Document/Documentation/Git%20Dictionary.md) buat konvensi commit message.
+- Menjalankan alat baris perintah atau perangkat lunak eksternal (misalnya `kicad-cli`, compiler, atau skrip build).
+- Menghasilkan berkas baru (laporan, hasil ekspor, netlist, dan sejenisnya), termasuk yang ditujukan semata-mata untuk membantu proses analisis.
+- Mengubah, menulis, atau menghapus berkas apa pun di dalam repositori.
+- Menjalankan operasi version control yang mengubah keadaan, seperti `git add`, `git commit`, atau `git push`.
+- Memasang atau mencabut dependensi maupun paket perangkat lunak.
 
-## Catatan Tambahan
+Apabila eksekusi ternyata diperlukan untuk dapat menjawab suatu pertanyaan analitis (misalnya memerlukan alat tertentu untuk membaca struktur berkas biner atau format tertutup), agen tetap wajib menawarkan rencana tersebut terlebih dahulu dan menjelaskan alasannya — kecuali pengguna telah memberikan izin eksplisit di awal permintaan (misalnya dengan menyatakan "gas", "langsung saja", atau pernyataan setara).
 
-- File `.kicad_sch`/`.kicad_pro` itu format teks (s-expression), bisa dibaca langsung tanpa perlu buka KiCad — prioritasin baca teksnya dulu sebelum mikir perlu jalanin tool eksternal.
-- Bahasa komunikasi ke user: santai, ringkas, langsung ke inti — hindari muter-muter atau jelasin hal yang gak ditanya.
+## 5. Konteks Proyek
+
+Proyek **Smart Doorlock Kos ISK** merupakan sistem kunci pintu pintar (smart doorlock) berbasis mikrokontroler ESP32-C3, yang dikendalikan melalui protokol ESP-NOW dan terintegrasi dengan Firebase. Struktur repositori adalah sebagai berikut:
+
+| Direktori | Isi |
+|-----------|-----|
+| `Hardware/` | Desain elektronik berbasis KiCad — skematik dan PCB untuk modul Doorlock (ESP32-C3, motor driver DRV8833, buck converter Mini560) serta modul Gateway. |
+| `Firmware/` | Kode firmware ESP32, dikelola dengan PlatformIO. |
+| `Document/` | Dokumentasi proyek, termasuk [Git Dictionary](Document/Documentation/Git%20Dictionary.md) yang berisi konvensi penulisan pesan commit. |
+
+## 6. Catatan Teknis Tambahan
+
+- Berkas dengan ekstensi `.kicad_sch` dan `.kicad_pro` merupakan berkas berbasis teks (format S-expression) dan dapat dibaca langsung tanpa perlu membuka aplikasi KiCad. Pembacaan berkas secara langsung harus diutamakan sebelum mempertimbangkan penggunaan alat eksternal.
+
+## 7. Gaya Komunikasi
+
+Komunikasi kepada pengguna hendaknya bersifat ringkas, langsung pada inti permasalahan, dan menghindari penjelasan yang tidak diminta atau di luar konteks pertanyaan.
