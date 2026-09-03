@@ -1,0 +1,45 @@
+{
+  "head": {
+    "docType": "2",
+    "editorVersion": "6.5.57",
+    "newgId": true,
+    "c_para": {
+      "name": "SSD1306-OLED-128X64-I2C-MOD-BIMA ANANTA BIRANI",
+      "package": "SSD1306-OLED-128X64-I2C",
+      "pre": "LCD?",
+      "Manufacturer": "",
+      "Manufacturer Part": "",
+      "Supplier Part": "",
+      "Supplier": "",
+      "link": "",
+      "Contributor": "Karas"
+    },
+    "c_spiceCmd": null,
+    "add_into_bom": "yes",
+    "puuid": "c0d0de2a89f24b6aa00858b86433a230",
+    "hasIdFlag": true,
+    "x": 400,
+    "y": 300,
+    "uuid": "4ed03d4d3b9e42c6ba6416fce8b85d3e",
+    "utime": 1695199652,
+    "importFlag": 0
+  },
+  "canvas": "CA~1000~1000~#FFFFFF~yes~#CCCCCC~10~1000~1000~line~10~pixel~5~400~300",
+  "shape": [
+    "P~show~0~1~430~285~~gge5~0^^430~285^^M 430 285 h -20~#880000^^1~408~288~0~GND~end~~~#0000FF^^1~415~284~0~1~start~~~#0000FF^^0~413~285^^0~M 410 282 L 407 285 L 410 288",
+    "P~show~0~2~430~295~~gge12~0^^430~295^^M 430 295 h -20~#880000^^1~408~298~0~VCC~end~~~#0000FF^^1~415~294~0~2~start~~~#0000FF^^0~413~295^^0~M 410 292 L 407 295 L 410 298",
+    "P~show~0~3~430~305~~gge19~0^^430~305^^M 430 305 h -20~#880000^^1~408~308~0~SCL~end~~~#0000FF^^1~415~304~0~3~start~~~#0000FF^^0~413~305^^0~M 410 302 L 407 305 L 410 308",
+    "P~show~0~4~430~315~~gge26~0^^430~315^^M 430 315 h -20~#880000^^1~408~318~0~SDA~end~~~#0000FF^^1~415~314~0~4~start~~~#0000FF^^0~413~315^^0~M 410 312 L 407 315 L 410 318",
+    "R~320~245~~~90~110~#000000~1~0~none~gge40~0~",
+    "R~340~255~~~40~90~#000000~1~0~none~gge41~0~",
+    "T~L~374.08~328.9~270~#000000~monospace~9pt~~~~comment~128 x 64~1~~gge49~0~pinpart",
+    "T~L~354.08~323.9~270~#000000~monospace~9pt~~~~comment~SSD1306~1~~gge54~0~pinpart"
+  ],
+  "BBox": {
+    "x": 320,
+    "y": 245,
+    "width": 111.3,
+    "height": 110
+  },
+  "colors": {}
+}
