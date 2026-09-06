@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ISK House — Kontrol Doorlock</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- ===== AUTH VIEW ===== -->
+    <div class="auth-view" id="authView">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <span class="brand-mark">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 0112 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
+                </span>
+                <span class="brand-name">ISK House</span>
+            </div>
+
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-mode="login">Masuk</button>
+                <button class="auth-tab" data-mode="register">Daftar</button>
+            </div>
+
+            <form id="authForm">
+                <label class="field">
+                    <span>Email</span>
+                    <input type="email" id="authEmail" required placeholder="admin@iskhouse.id">
+                </label>
+                <label class="field">
+                    <span>Kata Sandi</span>
+                    <input type="password" id="authPassword" required placeholder="Minimal 6 karakter">
+                </label>
+                <p class="auth-error" id="authError"></p>
+                <button type="submit" class="btn-primary btn-full" id="authSubmit">Masuk</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- ===== APP VIEW (muncul setelah login) ===== -->
+    <div class="app-view" id="appView">
+
+        <header class="navbar">
+            <div class="brand">
+                <span class="brand-mark">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 0112 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
+                </span>
+                <span class="brand-name">ISK House</span>
+            </div>
+            <div class="navbar-right">
+                <span class="user-email" id="userEmail"></span>
+                <span class="status-pill" id="connStatus">
+                    <span class="status-dot"></span>Online
+                </span>
+                <button class="btn-ghost" id="logoutBtn">Keluar</button>
+            </div>
+        </header>
+
+        <div class="app-shell">
+
+            <!-- Lokasi -->
+            <div class="toolbar-row">
+                <label class="location-select-wrap">
+                    <svg viewBox="0 0 24 24" fill="none" class="pin-icon"><path d="M12 21s7-6.2 7-11.5A7 7 0 105 9.5C5 14.8 12 21 12 21z" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="9.5" r="2.3" stroke="currentColor" stroke-width="1.7"/></svg>
+                    <select id="locationSelect"></select>
+                </label>
+                <button class="btn-icon-add" id="addLocationBtn" title="Tambah Alamat Kos">+ Kos</button>
+                <button class="btn-icon-add danger" id="deleteLocationBtn" title="Hapus Kos Ini">Hapus</button>
+            </div>
+            <p class="location-address" id="locationAddress"></p>
+
+            <!-- Tab Lantai -->
+            <div class="toolbar-row gateway-tabs-row">
+                <div class="gateway-tabs" id="gatewayTabs"></div>
+                <button class="btn-icon-add" id="addGatewayBtn" title="Tambah Lantai">+ Lantai</button>
+            </div>
+
+            <main class="content">
+
+                <section class="gateway-summary" id="gatewaySummary"></section>
+
+                <section class="block">
+                    <div class="block-head">
+                        <h2>Daftar Kamar</h2>
+                        <span class="block-count" id="roomCount">0/15</span>
+                    </div>
+                    <div class="room-grid" id="roomList"></div>
+                    <button class="btn-add" id="addRoomBtn">+ Tambah Kamar</button>
+                </section>
+
+                <section class="block">
+                    <div class="block-head">
+                        <h2>Riwayat Akses</h2>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="history-table" id="historyTable">
+                            <thead>
+                                <tr><th>Waktu</th><th>Aksi</th><th>Kamar</th><th>Oleh</th></tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </section>
+
+            </main>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Tambah/Edit Kamar ===== -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <h3 id="modalTitle">Tambah Kamar</h3>
+            <label class="field">
+                <span>Nomor Kamar</span>
+                <select id="roomNumberInput"></select>
+            </label>
+            <label class="field">
+                <span>Nama Penghuni</span>
+                <input type="text" id="tenantNameInput" placeholder="Kosongkan jika belum ada penghuni">
+            </label>
+            <label class="field field--switch">
+                <span>Akses RFID (kartu penghuni)</span>
+                <label class="switch">
+                    <input type="checkbox" id="rfidInput">
+                    <span class="slider"></span>
+                </label>
+            </label>
+            <p class="field-hint">Matikan kalau penghuni belum membayar — kartu RFID tidak akan bisa membuka pintu.</p>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="modalCancel">Batal</button>
+                <button class="btn-primary" id="modalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Tambah Lokasi Kos ===== -->
+    <div class="modal-overlay" id="locModalOverlay">
+        <div class="modal">
+            <h3>Tambah Alamat Kos</h3>
+            <label class="field">
+                <span>Nama Kos</span>
+                <input type="text" id="locNameInput" placeholder="ISK House — Cabang ...">
+            </label>
+            <label class="field">
+                <span>Alamat Lengkap</span>
+                <input type="text" id="locAddressInput" placeholder="Jl. ..., Kecamatan, Kota">
+            </label>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="locModalCancel">Batal</button>
+                <button class="btn-primary" id="locModalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Tambah Lantai/Gateway ===== -->
+    <div class="modal-overlay" id="gwModalOverlay">
+        <div class="modal">
+            <h3>Tambah Lantai (Gateway)</h3>
+            <label class="field">
+                <span>Nama Lantai</span>
+                <input type="text" id="gwNameInput" placeholder="Lantai 3">
+            </label>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="gwModalCancel">Batal</button>
+                <button class="btn-primary" id="gwModalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

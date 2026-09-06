@@ -11,6 +11,14 @@
 		{
 			"name": "Firmware-Gateway",
 			"path": "Firmware/Gateway"
+		},
+		{
+			"name": "Website",
+			"path": "Website"
+		},
+		{
+			"name": "Firmware-Website",
+			"path": "Website/Firmware"
 		}
 	],
 	"settings": {}
