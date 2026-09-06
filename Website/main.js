@@ -11,10 +11,10 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
-const db = firebase.database();
+const db = firebase.database();n
 
-const MAX_ROOMS = 15;
-const MAX_HISTORY_PER_ROOM = 10;   // riwayat disimpan maks 10 terakhir per kamar
+const MAX_ROOMS = 20;
+const MAX_HISTORY_PER_ROOM = 10;   // riwayat disimpan maks 1000 terakhir per kamar
 const AUTO_LOCK_SECONDS = 5;       // ganti angka ini untuk atur durasi pintu terbuka
 
 let locationsData = {};
