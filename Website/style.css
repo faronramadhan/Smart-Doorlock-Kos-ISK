@@ -40,9 +40,9 @@ button, input, select { font-family: inherit; }
 .brand-mark {
     width: 32px; height: 32px;
     display: flex; align-items: center; justify-content: center;
-    background: var(--accent); color: #fff; border-radius: 8px; flex-shrink: 0;
+    border-radius: 8px; flex-shrink: 0; overflow: hidden;
 }
-.brand-mark svg { width: 17px; height: 17px; }
+.brand-mark img { width: 100%; height: 100%; object-fit: cover; }
 .brand-name { font-size: 16px; font-weight: 700; }
 
 .app-view { display: none; }
@@ -73,6 +73,8 @@ button, input, select { font-family: inherit; }
 /* ===== LAYOUT SHELL (responsif) ===== */
 .app-shell { max-width: 1040px; margin: 0 auto; padding: 20px 24px 60px; }
 .content { display: block; }
+
+@media (min-width: 1300px) { .app-shell { max-width: 1280px; } }
 
 .toolbar-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .gateway-tabs-row { margin-bottom: 20px; }
@@ -133,6 +135,7 @@ button, input, select { font-family: inherit; }
 }
 @media (min-width: 640px) { .room-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 1000px) { .room-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 1300px) { .room-grid { grid-template-columns: repeat(4, 1fr); } }
 
 .room-item {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -213,4 +216,26 @@ input:checked + .slider::before { transform: translateX(16px); }
     .modal-overlay { align-items: center; }
     .modal { border-radius: 14px; max-width: 400px; }
     .user-email { display: inline; }
+}
+
+/* ===== LAYAR HP KECIL ===== */
+@media (max-width: 480px) {
+    .navbar { padding: 12px 14px; }
+    .brand-name { font-size: 14.5px; }
+    .status-pill .status-text { display: none; }
+    .btn-ghost { padding: 7px 10px; }
+
+    .app-shell { padding: 14px 14px 40px; }
+
+    .toolbar-row { gap: 8px; }
+    .location-select-wrap { min-width: 0; padding: 8px 10px; }
+    .btn-icon-add { padding: 8px 10px; font-size: 11.5px; }
+
+    .gateway-summary { padding: 14px; gap: 10px; }
+    .gs-stats { gap: 12px; flex: 1; justify-content: space-between; }
+
+    .room-actions { flex-wrap: wrap; }
+    .icon-btn { flex: 1 1 calc(50% - 3px); font-size: 10.5px; }
+
+    .modal { padding: 18px 16px 20px; }
 }

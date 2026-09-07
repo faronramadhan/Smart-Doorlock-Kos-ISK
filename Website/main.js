@@ -11,10 +11,10 @@ const firebaseConfig = {
 
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
-const db = firebase.database();n
+const db = firebase.database();
 
 const MAX_ROOMS = 20;
-const MAX_HISTORY_PER_ROOM = 10;   // riwayat disimpan maks 1000 terakhir per kamar
+const MAX_HISTORY_PER_ROOM = 1000; // riwayat disimpan maks 1000 terakhir per kamar
 const AUTO_LOCK_SECONDS = 5;       // ganti angka ini untuk atur durasi pintu terbuka
 
 let locationsData = {};
@@ -26,6 +26,7 @@ let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
 
 /* ===== ELEMEN: AUTH ===== */
 const authView = document.getElementById('authView');
+const verifyView = document.getElementById('verifyView');
 const appView = document.getElementById('appView');
 const authForm = document.getElementById('authForm');
 const authEmail = document.getElementById('authEmail');
@@ -35,6 +36,12 @@ const authSubmit = document.getElementById('authSubmit');
 const authTabs = document.querySelectorAll('.auth-tab');
 const userEmailEl = document.getElementById('userEmail');
 const logoutBtn = document.getElementById('logoutBtn');
+
+const verifyEmailLabel = document.getElementById('verifyEmailLabel');
+const verifyError = document.getElementById('verifyError');
+const verifyCheckBtn = document.getElementById('verifyCheckBtn');
+const verifyResendBtn = document.getElementById('verifyResendBtn');
+const verifyLogoutBtn = document.getElementById('verifyLogoutBtn');
 
 let authMode = 'login';
 
@@ -54,16 +61,46 @@ authForm.addEventListener('submit', (e) => {
     const email = authEmail.value.trim();
     const password = authPassword.value;
 
-    const action = authMode === 'login'
-        ? auth.signInWithEmailAndPassword(email, password)
-        : auth.createUserWithEmailAndPassword(email, password);
-
-    action.catch(err => {
-        authError.textContent = terjemahkanErrorFirebase(err.code);
-    });
+    if (authMode === 'login') {
+        auth.signInWithEmailAndPassword(email, password)
+            .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
+    } else {
+        auth.createUserWithEmailAndPassword(email, password)
+            .then(cred => cred.user.sendEmailVerification())
+            .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
+    }
 });
 
 logoutBtn.addEventListener('click', () => auth.signOut());
+
+/* ===== VERIFIKASI EMAIL ===== */
+verifyCheckBtn.addEventListener('click', () => {
+    verifyError.textContent = '';
+    const user = auth.currentUser;
+    if (!user) return;
+
+    user.reload().then(() => {
+        if (user.emailVerified) {
+            showAppView(user);
+        } else {
+            verifyError.textContent = 'Email belum diverifikasi. Cek inbox/folder spam Anda.';
+        }
+    });
+});
+
+verifyResendBtn.addEventListener('click', () => {
+    verifyError.textContent = '';
+    const user = auth.currentUser;
+    if (!user) return;
+
+    verifyResendBtn.disabled = true;
+    user.sendEmailVerification()
+        .then(() => { verifyError.textContent = 'Email verifikasi terkirim ulang.'; })
+        .catch(err => { verifyError.textContent = terjemahkanErrorFirebase(err.code); })
+        .finally(() => { verifyResendBtn.disabled = false; });
+});
+
+verifyLogoutBtn.addEventListener('click', () => auth.signOut());
 
 function terjemahkanErrorFirebase(code) {
     const map = {
@@ -78,17 +115,29 @@ function terjemahkanErrorFirebase(code) {
 }
 
 /* ===== AUTH STATE ===== */
+function showAppView(user) {
+    currentUserEmail = user.email;
+    userEmailEl.textContent = user.email;
+    authView.style.display = 'none';
+    verifyView.style.display = 'none';
+    appView.classList.add('visible');
+    initAppData();
+}
+
 auth.onAuthStateChanged(user => {
-    if (user) {
-        currentUserEmail = user.email;
-        userEmailEl.textContent = user.email;
+    if (user && user.emailVerified) {
+        showAppView(user);
+    } else if (user && !user.emailVerified) {
+        currentUserEmail = '';
         authView.style.display = 'none';
-        appView.classList.add('visible');
-        initAppData();
+        appView.classList.remove('visible');
+        verifyView.style.display = 'flex';
+        verifyEmailLabel.textContent = user.email;
     } else {
         currentUserEmail = '';
-        authView.style.display = 'flex';
+        verifyView.style.display = 'none';
         appView.classList.remove('visible');
+        authView.style.display = 'flex';
     }
 });
 

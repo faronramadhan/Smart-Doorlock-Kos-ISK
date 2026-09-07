@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ISK House — Kontrol Doorlock</title>
+    <link rel="icon" type="image/jpeg" href="Logo ISK.jpg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
@@ -15,7 +16,7 @@
         <div class="auth-card">
             <div class="auth-brand">
                 <span class="brand-mark">
-                    <svg viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 0112 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
+                    <img src="Logo ISK.jpg" alt="Logo ISK">
                 </span>
                 <span class="brand-name">ISK House</span>
             </div>
@@ -40,20 +41,41 @@
         </div>
     </div>
 
+    <!-- ===== VERIFY EMAIL VIEW (muncul setelah daftar, sebelum email diverifikasi) ===== -->
+    <div class="auth-view" id="verifyView" style="display:none;">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <span class="brand-mark">
+                    <img src="Logo ISK.jpg" alt="Logo ISK">
+                </span>
+                <span class="brand-name">ISK House</span>
+            </div>
+            <h3 style="text-align:center; margin-bottom:10px;">Verifikasi Email Anda</h3>
+            <p style="text-align:center; color:var(--text-muted); font-size:13.5px; margin-bottom:20px;">
+                Kami sudah mengirim link verifikasi ke <strong id="verifyEmailLabel"></strong>.
+                Buka email tersebut dan klik link-nya, lalu tekan tombol "Saya Sudah Verifikasi" di bawah ini.
+            </p>
+            <p class="auth-error" id="verifyError"></p>
+            <button type="button" class="btn-primary btn-full" id="verifyCheckBtn">Saya Sudah Verifikasi</button>
+            <button type="button" class="btn-secondary btn-full" id="verifyResendBtn" style="margin-top:10px;">Kirim Ulang Email</button>
+            <button type="button" class="btn-ghost btn-full" id="verifyLogoutBtn" style="margin-top:10px;">Keluar</button>
+        </div>
+    </div>
+
     <!-- ===== APP VIEW (muncul setelah login) ===== -->
     <div class="app-view" id="appView">
 
         <header class="navbar">
             <div class="brand">
                 <span class="brand-mark">
-                    <svg viewBox="0 0 24 24" fill="none"><path d="M6 10V8a6 6 0 0112 0v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="10" width="16" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="15" r="1.6" fill="currentColor"/></svg>
+                    <img src="Logo ISK.jpg" alt="Logo ISK">
                 </span>
                 <span class="brand-name">ISK House</span>
             </div>
             <div class="navbar-right">
                 <span class="user-email" id="userEmail"></span>
                 <span class="status-pill" id="connStatus">
-                    <span class="status-dot"></span>Online
+                    <span class="status-dot"></span><span class="status-text">Online</span>
                 </span>
                 <button class="btn-ghost" id="logoutBtn">Keluar</button>
             </div>
