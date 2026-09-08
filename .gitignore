@@ -13,3 +13,6 @@
 Thumbs.db
 .DS_Store
 dekstop.ini
+
+# Firebase
+.firebase/

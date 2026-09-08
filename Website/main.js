@@ -17,16 +17,36 @@ const MAX_ROOMS = 20;
 const MAX_HISTORY_PER_ROOM = 1000; // riwayat disimpan maks 1000 terakhir per kamar
 const AUTO_LOCK_SECONDS = 5;       // ganti angka ini untuk atur durasi pintu terbuka
 
+// Firebase Auth butuh format email, jadi username tanpa "@" diubah jadi email sintetis dengan domain ini
+const AUTH_EMAIL_DOMAIN = 'isk-house.local';
+
 let locationsData = {};
 let currentLoc = null;
 let currentGw = null;
 let editingRoomNumber = null;
 let currentUserEmail = '';
+let currentUserRole = '';
+let currentUserLabel = '';
+let userRecordRef = null;      // listener realtime ke users/{uid} milik user yang sedang login
+let pendingUsersRef = null;    // listener realtime ke daftar pendaftar yang menunggu persetujuan (khusus admin)
 let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
+
+/* Username tanpa "@" (misal "AdminISK-House") diubah jadi email sintetis untuk Firebase Auth */
+function toAuthEmail(raw) {
+    const value = raw.trim();
+    return value.includes('@') ? value.toLowerCase() : `${value.toLowerCase()}@${AUTH_EMAIL_DOMAIN}`;
+}
+
+/* Nomor urut "User-1", "User-2", dst — dipakai sebagai label tampilan, bukan sebagai key database */
+function nextUserLabel() {
+    return db.ref('meta/userCounter').transaction(current => (current || 0) + 1)
+        .then(result => `User-${result.snapshot.val()}`);
+}
 
 /* ===== ELEMEN: AUTH ===== */
 const authView = document.getElementById('authView');
 const verifyView = document.getElementById('verifyView');
+const pendingView = document.getElementById('pendingView');
 const appView = document.getElementById('appView');
 const authForm = document.getElementById('authForm');
 const authEmail = document.getElementById('authEmail');
@@ -43,6 +63,10 @@ const verifyCheckBtn = document.getElementById('verifyCheckBtn');
 const verifyResendBtn = document.getElementById('verifyResendBtn');
 const verifyLogoutBtn = document.getElementById('verifyLogoutBtn');
 
+const pendingTitle = document.getElementById('pendingTitle');
+const pendingMessage = document.getElementById('pendingMessage');
+const pendingLogoutBtn = document.getElementById('pendingLogoutBtn');
+
 let authMode = 'login';
 
 authTabs.forEach(tab => {
@@ -58,7 +82,7 @@ authTabs.forEach(tab => {
 authForm.addEventListener('submit', (e) => {
     e.preventDefault();
     authError.textContent = '';
-    const email = authEmail.value.trim();
+    const email = toAuthEmail(authEmail.value);
     const password = authPassword.value;
 
     if (authMode === 'login') {
@@ -66,12 +90,24 @@ authForm.addEventListener('submit', (e) => {
             .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
     } else {
         auth.createUserWithEmailAndPassword(email, password)
-            .then(cred => cred.user.sendEmailVerification())
+            .then(cred => {
+                return nextUserLabel().then(label => {
+                    db.ref(`users/${cred.user.uid}`).set({
+                        email: email,
+                        label: label,
+                        role: 'user',
+                        status: 'pending',
+                        createdAt: Date.now()
+                    });
+                    return cred.user.sendEmailVerification();
+                });
+            })
             .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
     }
 });
 
 logoutBtn.addEventListener('click', () => auth.signOut());
+pendingLogoutBtn.addEventListener('click', () => auth.signOut());
 
 /* ===== VERIFIKASI EMAIL ===== */
 verifyCheckBtn.addEventListener('click', () => {
@@ -81,7 +117,7 @@ verifyCheckBtn.addEventListener('click', () => {
 
     user.reload().then(() => {
         if (user.emailVerified) {
-            showAppView(user);
+            db.ref(`users/${user.uid}`).once('value').then(snap => handleUserRecord(user, snap.val()));
         } else {
             verifyError.textContent = 'Email belum diverifikasi. Cek inbox/folder spam Anda.';
         }
@@ -115,31 +151,157 @@ function terjemahkanErrorFirebase(code) {
 }
 
 /* ===== AUTH STATE ===== */
-function showAppView(user) {
+function showAppView(user, record) {
     currentUserEmail = user.email;
+    currentUserRole = record.role || 'user';
+    currentUserLabel = record.label || (currentUserRole === 'admin' ? 'Admin' : user.email);
     userEmailEl.textContent = user.email;
     authView.style.display = 'none';
     verifyView.style.display = 'none';
+    pendingView.style.display = 'none';
     appView.classList.add('visible');
     initAppData();
+    renderApprovalPanel();
+}
+
+function showVerifyView(user) {
+    currentUserEmail = '';
+    currentUserRole = '';
+    authView.style.display = 'none';
+    appView.classList.remove('visible');
+    pendingView.style.display = 'none';
+    verifyView.style.display = 'flex';
+    verifyEmailLabel.textContent = user.email;
+}
+
+/* state: 'pending' (menunggu persetujuan) atau 'rejected' (ditolak admin) */
+function showPendingView(state) {
+    currentUserEmail = '';
+    currentUserRole = '';
+    authView.style.display = 'none';
+    verifyView.style.display = 'none';
+    appView.classList.remove('visible');
+    detachApprovalPanel();
+
+    if (state === 'rejected') {
+        pendingTitle.textContent = 'Pendaftaran Ditolak';
+        pendingMessage.textContent = 'Maaf, pendaftaran akun Anda ditolak oleh admin. Hubungi admin ISK House jika ini keliru.';
+    } else {
+        pendingTitle.textContent = 'Menunggu Persetujuan Admin';
+        pendingMessage.textContent = 'Akun Anda sudah terverifikasi dan sedang menunggu persetujuan admin ISK House sebelum bisa mengakses dashboard. Halaman ini akan otomatis terbuka begitu disetujui.';
+    }
+    pendingView.style.display = 'flex';
+}
+
+/* Dipanggil tiap kali data users/{uid} berubah (baik saat login maupun saat admin menyetujui/menolak) */
+function handleUserRecord(user, record) {
+    if (record && record.role === 'admin') {
+        showAppView(user, record);
+        return;
+    }
+    if (!user.emailVerified) {
+        showVerifyView(user);
+        return;
+    }
+    if (record && record.status === 'approved') {
+        showAppView(user, record);
+        return;
+    }
+    if (record && record.status === 'rejected') {
+        showPendingView('rejected');
+        return;
+    }
+    if (!record) {
+        // Akun lama (dibuat sebelum fitur ini ada) atau data belum sempat dibuat saat daftar
+        nextUserLabel().then(label => {
+            db.ref(`users/${user.uid}`).set({ email: user.email, label: label, role: 'user', status: 'pending', createdAt: Date.now() });
+        });
+        return; // listener akan terpanggil lagi otomatis setelah data tersimpan
+    }
+    showPendingView('pending');
+}
+
+function attachUserRecordListener(user) {
+    detachUserRecordListener();
+    userRecordRef = db.ref(`users/${user.uid}`);
+    userRecordRef.on('value', (snap) => handleUserRecord(user, snap.val()));
+}
+
+function detachUserRecordListener() {
+    if (userRecordRef) { userRecordRef.off(); userRecordRef = null; }
 }
 
 auth.onAuthStateChanged(user => {
-    if (user && user.emailVerified) {
-        showAppView(user);
-    } else if (user && !user.emailVerified) {
-        currentUserEmail = '';
-        authView.style.display = 'none';
-        appView.classList.remove('visible');
-        verifyView.style.display = 'flex';
-        verifyEmailLabel.textContent = user.email;
+    if (user) {
+        attachUserRecordListener(user);
     } else {
+        detachUserRecordListener();
+        detachApprovalPanel();
         currentUserEmail = '';
+        currentUserRole = '';
         verifyView.style.display = 'none';
+        pendingView.style.display = 'none';
         appView.classList.remove('visible');
         authView.style.display = 'flex';
     }
 });
+
+/* ===== PANEL PERSETUJUAN PENDAFTAR (khusus admin) ===== */
+const approvalBlock = document.getElementById('approvalBlock');
+const pendingUsersList = document.getElementById('pendingUsersList');
+const pendingCountEl = document.getElementById('pendingCount');
+
+function renderApprovalPanel() {
+    if (currentUserRole !== 'admin') {
+        detachApprovalPanel();
+        return;
+    }
+    approvalBlock.style.display = 'block';
+    if (pendingUsersRef) return; // listener sudah aktif
+
+    pendingUsersRef = db.ref('users').orderByChild('status').equalTo('pending');
+    pendingUsersRef.on('value', (snapshot) => {
+        const entries = [];
+        snapshot.forEach(child => { entries.push({ uid: child.key, ...child.val() }); return false; });
+        entries.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+        pendingCountEl.textContent = entries.length;
+
+        if (entries.length === 0) {
+            pendingUsersList.innerHTML = `<p class="pending-empty">Tidak ada pendaftar yang menunggu persetujuan.</p>`;
+            return;
+        }
+
+        pendingUsersList.innerHTML = entries.map(u => {
+            const date = u.createdAt ? new Date(u.createdAt).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+            return `
+                <div class="pending-user-item">
+                    <div class="pu-info">
+                        <div class="pu-email">${u.label ? `${u.label} — ${u.email}` : u.email}</div>
+                        <div class="pu-date">Daftar ${date}</div>
+                    </div>
+                    <div class="pu-actions">
+                        <button class="icon-btn" data-action="approve-user" data-uid="${u.uid}">Setujui</button>
+                        <button class="icon-btn danger" data-action="reject-user" data-uid="${u.uid}">Tolak</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        pendingUsersList.querySelectorAll('[data-action]').forEach(btn => {
+            const uid = btn.dataset.uid;
+            btn.addEventListener('click', () => {
+                const newStatus = btn.dataset.action === 'approve-user' ? 'approved' : 'rejected';
+                db.ref(`users/${uid}`).update({ status: newStatus });
+            });
+        });
+    });
+}
+
+function detachApprovalPanel() {
+    if (pendingUsersRef) { pendingUsersRef.off(); pendingUsersRef = null; }
+    if (approvalBlock) approvalBlock.style.display = 'none';
+}
 
 /* ===== ELEMEN: APP ===== */
 const locationSelect = document.getElementById('locationSelect');
@@ -272,6 +434,7 @@ function renderLocations() {
 
 locationSelect.addEventListener('change', () => {
     currentLoc = locationSelect.value;
+    locationAddress.textContent = locationsData[currentLoc]?.address || '';
     const gateways = locationsData[currentLoc].gateways || {};
     currentGw = Object.keys(gateways)[0] || null;
     renderGatewayTabs();
@@ -287,14 +450,29 @@ addLocationBtn.addEventListener('click', () => {
 document.getElementById('locModalCancel').addEventListener('click', () => locModalOverlay.classList.remove('open'));
 locModalOverlay.addEventListener('click', (e) => { if (e.target === locModalOverlay) locModalOverlay.classList.remove('open'); });
 
+/* Bikin key Firebase yang enak dibaca dari Nama + Alamat, mis. "ISK House - Kemayoran" */
+function generateLocationKey(name, address) {
+    let base = address ? `${name} - ${address}` : name;
+    base = base.replace(/[.#$\[\]/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!base) base = 'Kos';
+
+    let key = base;
+    let i = 2;
+    while (locationsData[key]) {
+        key = `${base} (${i})`;
+        i++;
+    }
+    return key;
+}
+
 document.getElementById('locModalSave').addEventListener('click', () => {
     const name = locNameInput.value.trim();
     const address = locAddressInput.value.trim();
     if (!name) return;
 
-    const newRef = db.ref('locations').push();
-    newRef.set({ name, address, gateways: {} }).then(() => {
-        currentLoc = newRef.key;
+    const key = generateLocationKey(name, address);
+    db.ref(`locations/${key}`).set({ name, address, gateways: {} }).then(() => {
+        currentLoc = key;
         currentGw = null;
     });
 
@@ -335,12 +513,24 @@ addGatewayBtn.addEventListener('click', () => {
 document.getElementById('gwModalCancel').addEventListener('click', () => gwModalOverlay.classList.remove('open'));
 gwModalOverlay.addEventListener('click', (e) => { if (e.target === gwModalOverlay) gwModalOverlay.classList.remove('open'); });
 
+/* Key gateway dibuat "Gateway 1", "Gateway 2", dst secara berurutan per lokasi (bukan push key acak) */
+function generateGatewayKey(locId) {
+    const gateways = locationsData[locId]?.gateways || {};
+    let n = Object.keys(gateways).length + 1;
+    let key = `Gateway ${n}`;
+    while (gateways[key]) {
+        n++;
+        key = `Gateway ${n}`;
+    }
+    return key;
+}
+
 document.getElementById('gwModalSave').addEventListener('click', () => {
     const name = gwNameInput.value.trim();
     if (!name || !currentLoc) return;
 
-    const newRef = db.ref(`locations/${currentLoc}/gateways`).push();
-    newRef.set({ name, rooms: {} }).then(() => { currentGw = newRef.key; });
+    const key = generateGatewayKey(currentLoc);
+    db.ref(`locations/${currentLoc}/gateways/${key}`).set({ name, rooms: {} }).then(() => { currentGw = key; });
 
     gwModalOverlay.classList.remove('open');
 });
@@ -527,7 +717,7 @@ function toggleLock(number) {
 
     if (newStatus === 'unlocked') {
         db.ref(path).update({ status: 'unlocked', unlockedAt: Date.now() });
-        logHistory(loc, gw, number, 'unlock', currentUserEmail || 'Admin');
+        logHistory(loc, gw, number, 'unlock', currentUserLabel || 'Admin');
 
         autoLockTimers[timerKey] = setTimeout(() => {
             db.ref(path).update({ status: 'locked', unlockedAt: null });
@@ -536,7 +726,7 @@ function toggleLock(number) {
         }, AUTO_LOCK_SECONDS * 1000);
     } else {
         db.ref(path).update({ status: 'locked', unlockedAt: null });
-        logHistory(loc, gw, number, 'lock', currentUserEmail || 'Admin');
+        logHistory(loc, gw, number, 'lock', currentUserLabel || 'Admin');
     }
 
     // TODO: ESP32 Gateway membaca perubahan status di path ini via HTTP polling / listener
@@ -550,7 +740,7 @@ function toggleRfid(number) {
     const newAccess = !room.rfidAccess;
 
     roomRef.update({ rfidAccess: newAccess });
-    logHistory(loc, gw, number, newAccess ? 'rfid_unblock' : 'rfid_block', currentUserEmail || 'Admin');
+    logHistory(loc, gw, number, newAccess ? 'rfid_unblock' : 'rfid_block', currentUserLabel || 'Admin');
     // TODO: ESP32-C3 mengecek field rfidAccess ini sebelum mengizinkan kartu membuka pintu
 }
 
