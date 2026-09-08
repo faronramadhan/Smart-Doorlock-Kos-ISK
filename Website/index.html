@@ -28,8 +28,8 @@
 
             <form id="authForm">
                 <label class="field">
-                    <span>Email</span>
-                    <input type="email" id="authEmail" required placeholder="admin@iskhouse.id">
+                    <span>Username / Email</span>
+                    <input type="text" id="authEmail" required placeholder="Username atau email" autocomplete="username">
                 </label>
                 <label class="field">
                     <span>Kata Sandi</span>
@@ -59,6 +59,21 @@
             <button type="button" class="btn-primary btn-full" id="verifyCheckBtn">Saya Sudah Verifikasi</button>
             <button type="button" class="btn-secondary btn-full" id="verifyResendBtn" style="margin-top:10px;">Kirim Ulang Email</button>
             <button type="button" class="btn-ghost btn-full" id="verifyLogoutBtn" style="margin-top:10px;">Keluar</button>
+        </div>
+    </div>
+
+    <!-- ===== PENDING VIEW (muncul setelah email diverifikasi, menunggu/ditolak persetujuan admin) ===== -->
+    <div class="auth-view" id="pendingView" style="display:none;">
+        <div class="auth-card">
+            <div class="auth-brand">
+                <span class="brand-mark">
+                    <img src="Logo ISK.jpg" alt="Logo ISK">
+                </span>
+                <span class="brand-name">ISK House</span>
+            </div>
+            <h3 style="text-align:center; margin-bottom:10px;" id="pendingTitle">Menunggu Persetujuan Admin</h3>
+            <p style="text-align:center; color:var(--text-muted); font-size:13.5px; margin-bottom:20px;" id="pendingMessage"></p>
+            <button type="button" class="btn-ghost btn-full" id="pendingLogoutBtn">Keluar</button>
         </div>
     </div>
 
@@ -101,6 +116,14 @@
             </div>
 
             <main class="content">
+
+                <section class="block" id="approvalBlock" style="display:none;">
+                    <div class="block-head">
+                        <h2>Persetujuan Pendaftar</h2>
+                        <span class="block-count" id="pendingCount">0</span>
+                    </div>
+                    <div id="pendingUsersList"></div>
+                </section>
 
                 <section class="gateway-summary" id="gatewaySummary"></section>
 

@@ -1,0 +1,10 @@
+{
+  "hosting": {
+    "public": "Website",
+    "ignore": [
+      "Website/Firmware/**",
+      "**/.*",
+      "**/node_modules/**"
+    ]
+  }
+}
