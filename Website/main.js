@@ -140,7 +140,7 @@ verifyLogoutBtn.addEventListener('click', () => auth.signOut());
 
 function terjemahkanErrorFirebase(code) {
     const map = {
-        'auth/email-already-in-use': 'Email sudah terdaftar, coba masuk.',
+        'auth/email-already-in-use': 'Email sudah terdaftar di Firebase Authentication. Jika ini akun test yang sudah dihapus dari Realtime Database, akun Auth-nya belum ikut terhapus — hapus juga dari Firebase Console > Authentication > Users.',
         'auth/invalid-email': 'Format email tidak valid.',
         'auth/weak-password': 'Kata sandi minimal 6 karakter.',
         'auth/user-not-found': 'Email belum terdaftar.',
@@ -224,7 +224,10 @@ function handleUserRecord(user, record) {
 function attachUserRecordListener(user) {
     detachUserRecordListener();
     userRecordRef = db.ref(`users/${user.uid}`);
-    userRecordRef.on('value', (snap) => handleUserRecord(user, snap.val()));
+    userRecordRef.on('value',
+        (snap) => handleUserRecord(user, snap.val()),
+        (err) => console.error('Gagal membaca data users/{uid}. Cek Realtime Database Rules.', err)
+    );
 }
 
 function detachUserRecordListener() {
@@ -295,6 +298,9 @@ function renderApprovalPanel() {
                 db.ref(`users/${uid}`).update({ status: newStatus });
             });
         });
+    }, (err) => {
+        console.error('Gagal membaca daftar pendaftar (users). Cek Realtime Database Rules & index "status".', err);
+        pendingUsersList.innerHTML = `<p class="pending-empty">Gagal memuat daftar pendaftar (izin database ditolak). Cek Rules di Firebase Console.</p>`;
     });
 }
 
