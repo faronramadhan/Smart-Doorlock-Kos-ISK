@@ -2,9 +2,13 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <mbedtls/md.h>
+#include <Preferences.h>
+
+#define MSG_DISCONNECT 2
+#define PAIRING_TIMEOUT 60000
 
 uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 }; // Kos ISK, Doorlock, HW v0, SW v0
+const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 };
 const uint8_t SECRET_KEY[] = "ISK-Doorlock-V0.0";
 
 typedef struct {
@@ -12,8 +16,12 @@ typedef struct {
   uint8_t proof[3];
 } AuthMessage;
 
+Preferences prefs;
+
 bool broadcasting = false;
-bool done = false;
+bool paired = false;
+uint8_t gatewayMac[6];
+unsigned long broadcastStartedAt = 0;
 
 void computeProof(uint32_t nonce, uint8_t *proofOut) {
   uint8_t fullHash[32];
@@ -22,8 +30,25 @@ void computeProof(uint32_t nonce, uint8_t *proofOut) {
   memcpy(proofOut, fullHash, 3);
 }
 
+void savePairing() {
+  prefs.putBool("paired", paired);
+  prefs.putBytes("gateway", gatewayMac, 6);
+}
+
+void loadPairing() {
+  paired = prefs.getBool("paired", false);
+  if (!paired) return;
+
+  prefs.getBytes("gateway", gatewayMac, 6);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, gatewayMac, 6);
+  esp_now_add_peer(&peer);
+
+  Serial.println("Sudah terhubung ke Gateway (dari penyimpanan).");
+}
+
 void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
-  if (!broadcasting || done || len != sizeof(AuthMessage)) return;
+  if (!broadcasting || len != sizeof(AuthMessage)) return;
 
   const AuthMessage *challenge = (const AuthMessage*)data;
 
@@ -37,11 +62,22 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
   esp_now_send(mac, (uint8_t*)&response, sizeof(response));
 
   broadcasting = false;
-  done = true;
+  paired = true;
+  memcpy(gatewayMac, mac, 6);
+  savePairing();
 
-  Serial.print("Challenge diterima (nonce=0x");
-  Serial.print(challenge->nonce, HEX);
-  Serial.println("), proof terkirim.");
+  Serial.printf("Challenge diterima (nonce=0x%08X), proof terkirim.\n", challenge->nonce);
+}
+
+void disconnectFromGateway() {
+  uint8_t signal = MSG_DISCONNECT;
+  esp_now_send(gatewayMac, &signal, sizeof(signal));
+  esp_now_del_peer(gatewayMac);
+
+  paired = false;
+  savePairing();
+
+  Serial.println("Terputus dari Gateway lama.");
 }
 
 void setup() {
@@ -53,17 +89,28 @@ void setup() {
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, broadcastAddress, 6);
   esp_now_add_peer(&peer);
+
+  prefs.begin("doorlock", false);
+  loadPairing();
 }
 
 void loop() {
-  if (!broadcasting && !done && Serial.available()) {
+  if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();
 
-    if (command == "Pairing") {
+    if (command == "Pairing" && !broadcasting) {
+      if (paired) disconnectFromGateway();
+
       broadcasting = true;
+      broadcastStartedAt = millis();
       Serial.println("Broadcast tag dimulai...");
     }
+  }
+
+  if (broadcasting && millis() - broadcastStartedAt > PAIRING_TIMEOUT) {
+    broadcasting = false;
+    Serial.println("Timeout, kembali ke mode idle.");
   }
 
   if (broadcasting) {

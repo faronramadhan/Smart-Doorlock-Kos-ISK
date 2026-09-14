@@ -3,19 +3,26 @@
 #include <esp_now.h>
 #include <esp_system.h>
 #include <mbedtls/md.h>
+#include <Preferences.h>
 
-const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 }; // Kos ISK, Doorlock, HW v0, SW v0
-const uint8_t SECRET_KEY[] = "ISK-Doorlock-V0.0";
-
-#define MAX_QUEUE 16
+#define MAX_PEERS 20
+#define MAX_QUEUE 20
+#define MSG_DISCONNECT 2
+#define PAIRING_TIMEOUT 60000
 #define CHALLENGE_TIMEOUT 2000
+
+const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 };
+const uint8_t SECRET_KEY[] = "ISK-Doorlock-V0.0";
 
 typedef struct {
   uint32_t nonce;
   uint8_t proof[3];
 } AuthMessage;
 
+Preferences prefs;
+
 bool listening = false;
+unsigned long listenStartedAt = 0;
 
 uint8_t queueMac[MAX_QUEUE][6];
 int queueCount = 0;
@@ -25,6 +32,9 @@ uint32_t currentNonce = 0;
 unsigned long challengeSentAt = 0;
 bool awaitingResponse = false;
 
+int peerCount = 0;
+uint8_t peers[MAX_PEERS][6];
+
 void computeProof(uint32_t nonce, uint8_t *proofOut) {
   uint8_t fullHash[32];
   const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
@@ -32,11 +42,56 @@ void computeProof(uint32_t nonce, uint8_t *proofOut) {
   memcpy(proofOut, fullHash, 3);
 }
 
-void printMac(const uint8_t *mac) {
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  Serial.print(macStr);
+void savePeers() {
+  prefs.putUChar("count", peerCount);
+  prefs.putBytes("macs", peers, peerCount * 6);
+}
+
+void loadPeers() {
+  peerCount = prefs.getUChar("count", 0);
+  prefs.getBytes("macs", peers, peerCount * 6);
+
+  for (int i = 0; i < peerCount; i++) {
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, peers[i], 6);
+    esp_now_add_peer(&peer);
+  }
+
+  Serial.printf("Peer di-load: %d\n", peerCount);
+}
+
+void resetPeers() {
+  for (int i = 0; i < peerCount; i++) {
+    esp_now_del_peer(peers[i]);
+  }
+  peerCount = 0;
+  savePeers();
+  Serial.println("Semua peer dihapus.");
+}
+
+void printStatus() {
+  Serial.printf("Peer terhubung: %d/%d\n", peerCount, MAX_PEERS);
+  for (int i = 0; i < peerCount; i++) {
+    Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  peers[i][0], peers[i][1], peers[i][2], peers[i][3], peers[i][4], peers[i][5]);
+  }
+}
+
+void removePeer(const uint8_t *mac) {
+  for (int i = 0; i < peerCount; i++) {
+    if (memcmp(peers[i], mac, 6) != 0) continue;
+
+    esp_now_del_peer(mac);
+    for (int j = i; j < peerCount - 1; j++) {
+      memcpy(peers[j], peers[j + 1], 6);
+    }
+    peerCount--;
+    savePeers();
+
+    Serial.printf("Peer terputus: %02X:%02X:%02X:%02X:%02X:%02X (%d/%d)\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], peerCount, MAX_PEERS);
+    return;
+  }
 }
 
 bool alreadyQueued(const uint8_t *mac) {
@@ -47,43 +102,50 @@ bool alreadyQueued(const uint8_t *mac) {
 }
 
 void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
-  if (!listening) return;
-
-  if (len == 4 && memcmp(data, TAG, 4) == 0) {
-    if (awaitingResponse && memcmp(mac, currentMac, 6) == 0) return;
-    if (alreadyQueued(mac)) return;
-    if (queueCount >= MAX_QUEUE) return;
-
-    memcpy(queueMac[queueCount], mac, 6);
-    queueCount++;
-
-    Serial.print("Tag cocok dari ");
-    printMac(mac);
-    Serial.println(", masuk antrian.");
+  if (len == 1 && data[0] == MSG_DISCONNECT) {
+    removePeer(mac);
     return;
   }
 
-  if (len == sizeof(AuthMessage) && awaitingResponse) {
-    if (memcmp(mac, currentMac, 6) != 0) return;
+  if (!listening) return;
 
+  if (len == 4 && memcmp(data, TAG, 4) == 0) {
+    if (esp_now_is_peer_exist(mac) || alreadyQueued(mac)) return;
+    if (awaitingResponse && memcmp(mac, currentMac, 6) == 0) return;
+    if (peerCount >= MAX_PEERS || queueCount >= MAX_QUEUE) return;
+
+    memcpy(queueMac[queueCount], mac, 6);
+    queueCount++;
+    listenStartedAt = millis();
+
+    Serial.printf("Kandidat terdeteksi: %02X:%02X:%02X:%02X:%02X:%02X, masuk antrian.\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return;
+  }
+
+  if (len == sizeof(AuthMessage) && awaitingResponse && memcmp(mac, currentMac, 6) == 0) {
     const AuthMessage *reply = (const AuthMessage*)data;
     if (reply->nonce != currentNonce) return;
 
     uint8_t expectedProof[3];
     computeProof(currentNonce, expectedProof);
 
-    Serial.print("Balasan dari ");
-    printMac(mac);
-    Serial.print(" -> ");
-
     if (memcmp(reply->proof, expectedProof, 3) == 0) {
-      Serial.println("VALID, peer didaftarkan.");
+      memcpy(peers[peerCount], currentMac, 6);
+      peerCount++;
+      savePeers();
+
+      Serial.printf("Valid, bonding permanen: %02X:%02X:%02X:%02X:%02X:%02X (%d/%d)\n",
+                    currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5],
+                    peerCount, MAX_PEERS);
     } else {
-      Serial.println("TIDAK VALID, ditolak.");
       esp_now_del_peer(currentMac);
+      Serial.printf("Tidak valid, ditolak: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5]);
     }
 
     awaitingResponse = false;
+    listenStartedAt = millis();
   }
 }
 
@@ -92,28 +154,38 @@ void setup() {
   WiFi.mode(WIFI_STA);
   esp_now_init();
   esp_now_register_recv_cb(onReceive);
+
+  prefs.begin("gateway", false);
+  loadPeers();
 }
 
 void loop() {
-  if (!listening && Serial.available()) {
+  if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();
 
-    if (command == "Pairing") {
+    if (command == "Pairing" && !listening) {
       listening = true;
+      listenStartedAt = millis();
+      queueCount = 0;
+      awaitingResponse = false;
       Serial.println("Masuk mode listen...");
+    } else if (command == "Reset") {
+      resetPeers();
+    } else if (command == "Status") {
+      printStatus();
     }
   }
 
   if (awaitingResponse && millis() - challengeSentAt > CHALLENGE_TIMEOUT) {
-    Serial.print("Timeout menunggu balasan dari ");
-    printMac(currentMac);
-    Serial.println(".");
     esp_now_del_peer(currentMac);
+    Serial.printf("Timeout menunggu balasan dari %02X:%02X:%02X:%02X:%02X:%02X.\n",
+                  currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5]);
     awaitingResponse = false;
+    listenStartedAt = millis();
   }
 
-  if (listening && !awaitingResponse && queueCount > 0) {
+  if (listening && !awaitingResponse && queueCount > 0 && peerCount < MAX_PEERS) {
     memcpy(currentMac, queueMac[0], 6);
     for (int i = 1; i < queueCount; i++) {
       memcpy(queueMac[i - 1], queueMac[i], 6);
@@ -131,10 +203,18 @@ void loop() {
     challengeSentAt = millis();
     awaitingResponse = true;
 
-    Serial.print("Challenge dikirim ke ");
-    printMac(currentMac);
-    Serial.print(" (nonce=0x");
-    Serial.print(currentNonce, HEX);
-    Serial.println(").");
+    Serial.printf("Challenge dikirim ke %02X:%02X:%02X:%02X:%02X:%02X (nonce=0x%08X).\n",
+                  currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5],
+                  currentNonce);
+  }
+
+  if (listening && millis() - listenStartedAt > PAIRING_TIMEOUT) {
+    listening = false;
+    queueCount = 0;
+    if (awaitingResponse) {
+      esp_now_del_peer(currentMac);
+      awaitingResponse = false;
+    }
+    Serial.println("Timeout, kembali ke mode idle.");
   }
 }
