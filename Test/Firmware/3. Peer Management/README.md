@@ -4,10 +4,12 @@ Lanjutan dari percobaan [Autentikasi HMAC](../2.%20Autentikasi%20HMAC/), tapi se
 
 ## Perangkat
 
-| Perangkat | Board | Port |
-|-----------|-------|------|
-| Doorlock  | DFRobot Beetle ESP32-C3 | COM24 |
-| Gateway   | DFRobot Beetle ESP32-C3 | COM23 |
+| Perangkat  | Board | Port |
+|------------|-------|------|
+| Doorlock 1 | DFRobot Beetle ESP32-C3 | COM29 |
+| Doorlock 2 | DFRobot Beetle ESP32-C3 | COM30 |
+| Doorlock 3 | DFRobot Beetle ESP32-C3 | COM31 |
+| Gateway    | DFRobot Beetle ESP32-C3 | COM28 |
 
 ## Kenapa Test 2 Belum Cukup
 
@@ -178,14 +180,14 @@ Nggak ada command `Reset` terpisah di Doorlock. Command `Pairing` yang sama dipa
 
 ## Test Procedure
 
-1. Upload `Doorlock.cpp` dan `Gateway.cpp` ke masing-masing board lewat project PlatformIO di `Firmware/`.
-2. Buka dua serial monitor terpisah, ketik `Pairing` di kedua board (Newline sebagai line ending).
+1. Upload `Doorlock.cpp` ke ketiga board Doorlock (COM29, COM30, COM31) dan `Gateway.cpp` ke board Gateway (COM28), lewat project PlatformIO di `Firmware/`.
+2. Buka empat serial monitor terpisah (satu per board), ketik `Pairing` di salah satu Doorlock dan di Gateway (Newline sebagai line ending).
 3. Doorlock bakal broadcast tag, Gateway bakal:
    - Cetak `Kandidat terdeteksi: ..., masuk antrian.`
    - Cetak `Challenge dikirim ke ... (nonce=0x...).`
    - Cetak `Valid, bonding permanen: ... (1/20)`
 4. Ketik `Status` di Gateway — pastikan MAC Doorlock muncul di daftar.
 5. **Uji persistensi**: tekan tombol reset fisik di Gateway (jangan cabut kabel, cukup reset). Ketik `Status` lagi setelah boot ulang — MAC yang sama harus tetap muncul tanpa perlu pairing ulang.
-6. **Uji multi-device**: nyalakan Doorlock kedua, ketik `Pairing` di kedua Doorlock lalu `Pairing` sekali saja di Gateway. Keduanya harus ke-bonding berurutan dalam satu sesi listen yang sama.
+6. **Uji multi-device**: ketik `Pairing` di ketiga Doorlock (COM29, COM30, COM31), lalu `Pairing` sekali saja di Gateway. Ketiganya harus ke-bonding berurutan dalam satu sesi listen yang sama — cek `Status` sampai muncul `3/20`.
 7. **Uji disconnect**: ketik `Pairing` lagi di salah satu Doorlock yang udah `paired`. Doorlock akan cetak `Terputus dari Gateway lama.`, dan Gateway akan cetak `Peer terputus: ...` tanpa perlu command apapun di sisi Gateway.
 8. **Uji reset massal**: ketik `Reset` di Gateway — semua peer harus hilang dari `Status`, dan tetap kosong walau Gateway di-reset fisik.
