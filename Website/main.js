@@ -403,6 +403,45 @@ const gwNameInput = document.getElementById('gwNameInput');
 
 let dataListenerAttached = false;
 
+/* Field metadata milik lokasi (bukan nama lantai) — dipakai untuk memisahkan lantai dari name/address saat iterasi */
+const LOCATION_META_FIELDS = ['name', 'address'];
+
+/* Sanitasi teks jadi key Firebase yang aman (key tidak boleh berisi . # $ [ ] /) */
+function sanitizeKeyPart(text) {
+    return (text || '').replace(/[.#$\[\]/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+/* Key unik di antara object `existing`, dibuat langsung dari nama yang diketik admin (bukan id auto/counter).
+   `reserved` = field metadata di level yang sama yang tidak boleh "ketabrak" nama lantai/gateway. */
+function nextAvailableKey(existing, name, reserved, fallback) {
+    let base = sanitizeKeyPart(name) || fallback;
+    let key = base;
+    let i = 2;
+    while (existing[key] !== undefined || reserved.includes(key)) {
+        key = `${base} (${i})`;
+        i++;
+    }
+    return key;
+}
+
+/* Lantai = semua child lokasi selain field metadata name/address */
+function getFloors(loc) {
+    const result = {};
+    Object.entries(loc || {}).forEach(([k, v]) => {
+        if (!LOCATION_META_FIELDS.includes(k)) result[k] = v;
+    });
+    return result;
+}
+
+/* Gateway = semua child lantai selain field bookkeeping createdAt (dipakai supaya node lantai/gateway kosong tidak hilang dipangkas Firebase) */
+function getGateways(floor) {
+    const result = {};
+    Object.entries(floor || {}).forEach(([k, v]) => {
+        if (k !== 'createdAt') result[k] = v;
+    });
+    return result;
+}
+
 function initAppData() {
     if (dataListenerAttached) return;
     dataListenerAttached = true;
@@ -412,11 +451,11 @@ function initAppData() {
     db.ref('locations').on('value', (snapshot) => {
         const data = snapshot.val() || {};
 
-        // Skema lama (locations/{loc}/gateways langsung, tanpa lantai) dibungkus otomatis jadi "Lantai 1"
-        // supaya kos & kamar yang sudah ada tidak hilang saat upgrade ke skema lantai > 1 gateway.
+        // Skema lama (baik "gateways langsung di lokasi" maupun wrapper "floors/gateways") dimigrasikan
+        // otomatis ke skema ringkas locations/{cabang}/{lantai}/{gateway}/rooms, tanpa kehilangan data.
         const migration = migrateOldSchemaIfNeeded(data);
         if (migration) {
-            migration.catch(err => console.error('Migrasi skema lokasi (gateways -> floors) gagal.', err));
+            migration.catch(err => console.error('Migrasi skema lokasi gagal.', err));
             return; // listener ini akan terpanggil lagi otomatis setelah migrasi tersimpan
         }
 
@@ -426,7 +465,7 @@ function initAppData() {
             currentLoc = Object.keys(locationsData)[0] || null;
         }
         if (currentLoc) {
-            const floors = locationsData[currentLoc].floors || {};
+            const floors = getFloors(locationsData[currentLoc]);
             if (!currentFloor || !floors[currentFloor]) {
                 currentFloor = Object.keys(floors)[0] || null;
             }
@@ -434,7 +473,7 @@ function initAppData() {
             currentFloor = null;
         }
         if (currentFloor) {
-            const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
+            const gateways = getGateways(locationsData[currentLoc][currentFloor]);
             if (!currentGw || !gateways[currentGw]) {
                 currentGw = Object.keys(gateways)[0] || null;
             }
@@ -458,18 +497,46 @@ function initAppData() {
     }, 1000);
 }
 
-/* ===== MIGRASI: skema lama (gateways langsung di bawah lokasi) -> skema baru (floors -> gateways) ===== */
-/* Satu lantai butuh > 1 gateway karena jangkauan ESP-NOW gateway cuma ~5 meter. Return Promise kalau ada yang dimigrasikan, null kalau tidak. */
+/* ===== MIGRASI: skema lama -> skema ringkas locations/{cabang}/{lantai}/{gateway}/rooms ===== */
+/* Menangani 2 skema lama: (1) gateways langsung di lokasi (tiap entrinya sebenarnya 1 lantai),
+   (2) wrapper floors/{..}/gateways/{..}. Return Promise kalau ada yang dimigrasikan, null kalau tidak. */
 function migrateOldSchemaIfNeeded(data) {
     const updates = {};
     let needsMigration = false;
+    const now = Date.now();
 
     Object.entries(data).forEach(([locId, loc]) => {
-        if (loc && loc.gateways && !loc.floors) {
+        if (!loc) return;
+
+        if (loc.gateways) {
             needsMigration = true;
-            updates[`locations/${locId}/floors/Lantai 1/name`] = 'Lantai 1';
-            updates[`locations/${locId}/floors/Lantai 1/gateways`] = loc.gateways;
+            const usedFloorKeys = {};
+            Object.values(loc.gateways).forEach(oldGw => {
+                const floorKey = nextAvailableKey(usedFloorKeys, (oldGw && oldGw.name) || 'Lantai 1', LOCATION_META_FIELDS, 'Lantai');
+                usedFloorKeys[floorKey] = true;
+                updates[`locations/${locId}/${floorKey}/createdAt`] = now;
+                updates[`locations/${locId}/${floorKey}/Gateway 1/createdAt`] = now;
+                updates[`locations/${locId}/${floorKey}/Gateway 1/rooms`] = (oldGw && oldGw.rooms) || {};
+            });
             updates[`locations/${locId}/gateways`] = null;
+        } else if (loc.floors) {
+            needsMigration = true;
+            const usedFloorKeys = {};
+            Object.entries(loc.floors).forEach(([floorKey, floorObj]) => {
+                const newFloorKey = nextAvailableKey(usedFloorKeys, (floorObj && floorObj.name) || floorKey, LOCATION_META_FIELDS, 'Lantai');
+                usedFloorKeys[newFloorKey] = true;
+                updates[`locations/${locId}/${newFloorKey}/createdAt`] = now;
+
+                const oldGateways = (floorObj && floorObj.gateways) || {};
+                const usedGwKeys = {};
+                Object.entries(oldGateways).forEach(([gwKey, gwObj]) => {
+                    const newGwKey = nextAvailableKey(usedGwKeys, (gwObj && gwObj.name) || gwKey, ['createdAt'], 'Gateway');
+                    usedGwKeys[newGwKey] = true;
+                    updates[`locations/${locId}/${newFloorKey}/${newGwKey}/createdAt`] = now;
+                    updates[`locations/${locId}/${newFloorKey}/${newGwKey}/rooms`] = (gwObj && gwObj.rooms) || {};
+                });
+            });
+            updates[`locations/${locId}/floors`] = null;
         }
     });
 
@@ -477,22 +544,29 @@ function migrateOldSchemaIfNeeded(data) {
 }
 
 /* ===== SEED DATA AWAL ===== */
+/* Key cabang dibuat dari nama+alamat (generateLocationKey), bukan id generik seperti "loc1" */
 function seedIfEmpty() {
     db.ref('locations').once('value', (snapshot) => {
         if (snapshot.exists()) return;
 
+        const name = "ISK House Kemanggisan";
+        const address = "Jl. Kemanggisan Raya, Jakarta Barat";
+        const key = generateLocationKey(name, address);
+        const now = Date.now();
+
         db.ref('locations').set({
-            loc1: {
-                name: "ISK House Kemanggisan",
-                address: "Jl. Kemanggisan Raya, Jakarta Barat",
-                floors: {
-                    "Lantai 1": { name: "Lantai 1", gateways: {
-                        "Gateway 1": { name: "Gateway 1", rooms: {
+            [key]: {
+                name, address,
+                "Lantai 1": {
+                    createdAt: now,
+                    "Gateway 1": {
+                        createdAt: now,
+                        rooms: {
                             1: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
                             3: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
                             5: { tenant: "", rfidAccess: true, status: "locked" }
-                        }}
-                    }}
+                        }
+                    }
                 }
             }
         });
@@ -503,15 +577,15 @@ function seedIfEmpty() {
 /* Ini juga menangani kasus refresh browser di tengah hitung mundur */
 function ensureAutoLockTimers() {
     Object.entries(locationsData).forEach(([locId, loc]) => {
-        Object.entries(loc.floors || {}).forEach(([floorId, floor]) => {
-            Object.entries(floor.gateways || {}).forEach(([gwId, gw]) => {
-                Object.entries(gw.rooms || {}).forEach(([roomNum, room]) => {
+        Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
+            Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
+                Object.entries((gw && gw.rooms) || {}).forEach(([roomNum, room]) => {
                     const timerKey = `${locId}_${floorId}_${gwId}_${roomNum}`;
 
                     if (room.status === 'unlocked' && !autoLockTimers[timerKey]) {
                         const elapsed = Date.now() - (room.unlockedAt || Date.now());
                         const remainingMs = AUTO_LOCK_SECONDS * 1000 - elapsed;
-                        const path = `locations/${locId}/floors/${floorId}/gateways/${gwId}/rooms/${roomNum}`;
+                        const path = `locations/${locId}/${floorId}/${gwId}/rooms/${roomNum}`;
 
                         if (remainingMs <= 0) {
                             db.ref(path).update({ status: 'locked', unlockedAt: null });
@@ -550,9 +624,9 @@ function renderLocations() {
 locationSelect.addEventListener('change', () => {
     currentLoc = locationSelect.value;
     locationAddress.textContent = locationsData[currentLoc]?.address || '';
-    const floors = locationsData[currentLoc].floors || {};
+    const floors = getFloors(locationsData[currentLoc]);
     currentFloor = Object.keys(floors)[0] || null;
-    const gateways = currentFloor ? (floors[currentFloor].gateways || {}) : {};
+    const gateways = currentFloor ? getGateways(floors[currentFloor]) : {};
     currentGw = Object.keys(gateways)[0] || null;
     renderFloorTabs();
     renderGatewayTabs();
@@ -570,17 +644,8 @@ locModalOverlay.addEventListener('click', (e) => { if (e.target === locModalOver
 
 /* Bikin key Firebase yang enak dibaca dari Nama + Alamat, mis. "ISK House - Kemayoran" */
 function generateLocationKey(name, address) {
-    let base = address ? `${name} - ${address}` : name;
-    base = base.replace(/[.#$\[\]/]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
-    if (!base) base = 'Kos';
-
-    let key = base;
-    let i = 2;
-    while (locationsData[key]) {
-        key = `${base} (${i})`;
-        i++;
-    }
-    return key;
+    const raw = address ? `${name} - ${address}` : name;
+    return nextAvailableKey(locationsData, raw, [], 'Kos');
 }
 
 document.getElementById('locModalSave').addEventListener('click', () => {
@@ -589,7 +654,7 @@ document.getElementById('locModalSave').addEventListener('click', () => {
     if (!name) return;
 
     const key = generateLocationKey(name, address);
-    db.ref(`locations/${key}`).set({ name, address, floors: {} }).then(() => {
+    db.ref(`locations/${key}`).set({ name, address }).then(() => {
         currentLoc = key;
         currentFloor = null;
         currentGw = null;
@@ -611,15 +676,15 @@ deleteLocationBtn.addEventListener('click', () => {
 /* ===== RENDER: Tab Lantai ===== */
 function renderFloorTabs() {
     if (!currentLoc) { floorTabs.innerHTML = ''; return; }
-    const floors = locationsData[currentLoc].floors || {};
-    floorTabs.innerHTML = Object.entries(floors).map(([id, floor]) => `
-        <button class="gateway-tab ${id === currentFloor ? 'active' : ''}" data-floor="${id}">${floor.name}</button>
+    const floors = getFloors(locationsData[currentLoc]);
+    floorTabs.innerHTML = Object.keys(floors).map(id => `
+        <button class="gateway-tab ${id === currentFloor ? 'active' : ''}" data-floor="${id}">${id}</button>
     `).join('');
 
     floorTabs.querySelectorAll('.gateway-tab').forEach(btn => {
         btn.addEventListener('click', () => {
             currentFloor = btn.dataset.floor;
-            const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
+            const gateways = getGateways(locationsData[currentLoc][currentFloor]);
             currentGw = Object.keys(gateways)[0] || null;
             renderGatewayTabs();
             renderAll();
@@ -636,24 +701,17 @@ addFloorBtn.addEventListener('click', () => {
 document.getElementById('floorModalCancel').addEventListener('click', () => floorModalOverlay.classList.remove('open'));
 floorModalOverlay.addEventListener('click', (e) => { if (e.target === floorModalOverlay) floorModalOverlay.classList.remove('open'); });
 
-/* Key lantai dibuat "Lantai 1", "Lantai 2", dst secara berurutan per lokasi (bukan push key acak) */
-function generateFloorKey(locId) {
-    const floors = locationsData[locId]?.floors || {};
-    let n = Object.keys(floors).length + 1;
-    let key = `Lantai ${n}`;
-    while (floors[key]) {
-        n++;
-        key = `Lantai ${n}`;
-    }
-    return key;
+/* Key lantai = nama yang diketik admin langsung (disanitasi + di-dedup), bukan id auto seperti "Lantai 1" yang terpisah dari field name */
+function generateFloorKey(locId, name) {
+    return nextAvailableKey(locationsData[locId] || {}, name, LOCATION_META_FIELDS, 'Lantai');
 }
 
 document.getElementById('floorModalSave').addEventListener('click', () => {
     const name = floorNameInput.value.trim();
     if (!name || !currentLoc) return;
 
-    const key = generateFloorKey(currentLoc);
-    db.ref(`locations/${currentLoc}/floors/${key}`).set({ name, gateways: {} }).then(() => {
+    const key = generateFloorKey(currentLoc, name);
+    db.ref(`locations/${currentLoc}/${key}`).set({ createdAt: Date.now() }).then(() => {
         currentFloor = key;
         currentGw = null;
     });
@@ -665,9 +723,9 @@ document.getElementById('floorModalSave').addEventListener('click', () => {
 /* Satu lantai bisa punya > 1 gateway karena jangkauan ESP-NOW gateway terbatas (~5 meter) */
 function renderGatewayTabs() {
     if (!currentLoc || !currentFloor) { gatewayTabs.innerHTML = ''; return; }
-    const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
-    gatewayTabs.innerHTML = Object.entries(gateways).map(([id, gw]) => `
-        <button class="gateway-tab ${id === currentGw ? 'active' : ''}" data-gw="${id}">${gw.name}</button>
+    const gateways = getGateways(locationsData[currentLoc][currentFloor]);
+    gatewayTabs.innerHTML = Object.keys(gateways).map(id => `
+        <button class="gateway-tab ${id === currentGw ? 'active' : ''}" data-gw="${id}">${id}</button>
     `).join('');
 
     gatewayTabs.querySelectorAll('.gateway-tab').forEach(btn => {
@@ -687,24 +745,17 @@ addGatewayBtn.addEventListener('click', () => {
 document.getElementById('gwModalCancel').addEventListener('click', () => gwModalOverlay.classList.remove('open'));
 gwModalOverlay.addEventListener('click', (e) => { if (e.target === gwModalOverlay) gwModalOverlay.classList.remove('open'); });
 
-/* Key gateway dibuat "Gateway 1", "Gateway 2", dst secara berurutan per lantai (bukan push key acak) */
-function generateGatewayKey(locId, floorId) {
-    const gateways = locationsData[locId]?.floors?.[floorId]?.gateways || {};
-    let n = Object.keys(gateways).length + 1;
-    let key = `Gateway ${n}`;
-    while (gateways[key]) {
-        n++;
-        key = `Gateway ${n}`;
-    }
-    return key;
+/* Key gateway = nama yang diketik admin langsung (disanitasi + di-dedup), bukan id auto seperti "Gateway 1" yang terpisah dari field name */
+function generateGatewayKey(locId, floorId, name) {
+    return nextAvailableKey(locationsData[locId]?.[floorId] || {}, name, ['createdAt'], 'Gateway');
 }
 
 document.getElementById('gwModalSave').addEventListener('click', () => {
     const name = gwNameInput.value.trim();
     if (!name || !currentLoc || !currentFloor) return;
 
-    const key = generateGatewayKey(currentLoc, currentFloor);
-    db.ref(`locations/${currentLoc}/floors/${currentFloor}/gateways/${key}`).set({ name, rooms: {} }).then(() => { currentGw = key; });
+    const key = generateGatewayKey(currentLoc, currentFloor, name);
+    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({ createdAt: Date.now() }).then(() => { currentGw = key; });
 
     gwModalOverlay.classList.remove('open');
 });
@@ -712,7 +763,7 @@ document.getElementById('gwModalSave').addEventListener('click', () => {
 /* ===== Helper: ambil array kamar ===== */
 function getRoomsArray() {
     if (!currentLoc || !currentFloor || !currentGw) return [];
-    const rooms = locationsData[currentLoc]?.floors?.[currentFloor]?.gateways?.[currentGw]?.rooms || {};
+    const rooms = locationsData[currentLoc]?.[currentFloor]?.[currentGw]?.rooms || {};
     return Object.entries(rooms)
         .map(([number, data]) => ({ number: parseInt(number), ...data }))
         .sort((a, b) => a.number - b.number);
@@ -728,7 +779,7 @@ function renderSummary() {
 
     gatewaySummary.innerHTML = `
         <div>
-            <div class="gs-title">${locationsData[currentLoc].floors[currentFloor].gateways[currentGw].name}</div>
+            <div class="gs-title">${currentGw}</div>
             <div class="gs-sub">${rooms.length}/${MAX_ROOMS} kamar terpasang</div>
         </div>
         <div class="gs-stats">
@@ -865,7 +916,7 @@ function renderAll() {
 
 /* ===== Catat riwayat: disimpan nested di dalam kamar, dibatasi jumlahnya ===== */
 function logHistory(loc, floor, gw, roomNumber, action, by) {
-    const histRef = db.ref(`locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${roomNumber}/history`);
+    const histRef = db.ref(`locations/${loc}/${floor}/${gw}/rooms/${roomNumber}/history`);
     histRef.push({ action, by, timestamp: Date.now() });
 
     // Trim: hapus entri paling lama kalau sudah melebihi batas
@@ -885,7 +936,7 @@ function logHistory(loc, floor, gw, roomNumber, action, by) {
 /* ===== AKSI: Buka/Kunci Pintu ===== */
 function toggleLock(number) {
     const loc = currentLoc, floor = currentFloor, gw = currentGw;
-    const path = `locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${number}`;
+    const path = `locations/${loc}/${floor}/${gw}/rooms/${number}`;
     const room = getRoomsArray().find(r => r.number === number);
     const newStatus = room.status === 'locked' ? 'unlocked' : 'locked';
     const timerKey = `${loc}_${floor}_${gw}_${number}`;
@@ -915,7 +966,7 @@ function toggleLock(number) {
 /* ===== AKSI: Blokir/Izinkan RFID ===== */
 function toggleRfid(number) {
     const loc = currentLoc, floor = currentFloor, gw = currentGw;
-    const roomRef = db.ref(`locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${number}`);
+    const roomRef = db.ref(`locations/${loc}/${floor}/${gw}/rooms/${number}`);
     const room = getRoomsArray().find(r => r.number === number);
     const newAccess = !room.rfidAccess;
 
@@ -928,7 +979,7 @@ function toggleRfid(number) {
 function deleteRoom(number) {
     const room = getRoomsArray().find(r => r.number === number);
     if (!confirm(`Hapus Kamar ${number} (${room.tenant || 'kosong'})?`)) return;
-    db.ref(`locations/${currentLoc}/floors/${currentFloor}/gateways/${currentGw}/rooms/${number}`).remove();
+    db.ref(`locations/${currentLoc}/${currentFloor}/${currentGw}/rooms/${number}`).remove();
 }
 
 /* ===== MODAL: Tambah/Edit Kamar ===== */
@@ -968,7 +1019,7 @@ document.getElementById('modalSave').addEventListener('click', () => {
     const newNumber = parseInt(roomNumberInput.value);
     const newTenant = tenantNameInput.value.trim();
     const newRfid = rfidInput.checked;
-    const basePath = `locations/${currentLoc}/floors/${currentFloor}/gateways/${currentGw}/rooms`;
+    const basePath = `locations/${currentLoc}/${currentFloor}/${currentGw}/rooms`;
 
     if (editingRoomNumber) {
         const existing = getRoomsArray().find(r => r.number === editingRoomNumber);
@@ -1028,10 +1079,10 @@ function updateClassifyLocFields() {
 function updateClassifyFloorOptions() {
     const locId = classifyLocSelect.value;
     const isNewLoc = locId === NEW_OPTION_VALUE;
-    const floors = isNewLoc ? {} : (locationsData[locId]?.floors || {});
+    const floors = isNewLoc ? {} : getFloors(locationsData[locId]);
     const floorIds = Object.keys(floors);
 
-    classifyFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${floors[id].name}</option>`).join('')
+    classifyFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${id}</option>`).join('')
         + `<option value="${NEW_OPTION_VALUE}">+ Lantai Baru</option>`;
     classifyFloorSelect.value = (!isNewLoc && currentFloor && floors[currentFloor]) ? currentFloor : (floorIds[0] || NEW_OPTION_VALUE);
 
@@ -1050,10 +1101,10 @@ function updateClassifyGwOptions() {
     const floorId = classifyFloorSelect.value;
     const isNewLoc = locId === NEW_OPTION_VALUE;
     const isNewFloor = floorId === NEW_OPTION_VALUE;
-    const gateways = (isNewLoc || isNewFloor) ? {} : (locationsData[locId]?.floors?.[floorId]?.gateways || {});
+    const gateways = (isNewLoc || isNewFloor) ? {} : getGateways(locationsData[locId]?.[floorId]);
     const gwIds = Object.keys(gateways);
 
-    classifyGwSelect.innerHTML = gwIds.map(id => `<option value="${id}">${gateways[id].name}</option>`).join('')
+    classifyGwSelect.innerHTML = gwIds.map(id => `<option value="${id}">${id}</option>`).join('')
         + `<option value="${NEW_OPTION_VALUE}">+ Gateway Baru</option>`;
     classifyGwSelect.value = (!isNewLoc && !isNewFloor && currentGw && gateways[currentGw]) ? currentGw : (gwIds[0] || NEW_OPTION_VALUE);
 
@@ -1077,7 +1128,7 @@ function updateClassifyRoomOptions() {
 
     let usedNumbers = [];
     if (!isNewLoc && !isNewFloor && !isNewGw) {
-        const rooms = locationsData[locId]?.floors?.[floorId]?.gateways?.[gwId]?.rooms || {};
+        const rooms = locationsData[locId]?.[floorId]?.[gwId]?.rooms || {};
         usedNumbers = Object.keys(rooms).map(Number);
     }
 
@@ -1119,7 +1170,7 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         const name = classifyLocNameInput.value.trim();
         const address = classifyLocAddressInput.value.trim();
         const locId = generateLocationKey(name, address);
-        locWrite = db.ref(`locations/${locId}`).set({ name, address, floors: {} }).then(() => locId);
+        locWrite = db.ref(`locations/${locId}`).set({ name, address }).then(() => locId);
     } else {
         locWrite = Promise.resolve(classifyLocSelect.value);
     }
@@ -1128,8 +1179,8 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         let floorWrite;
         if (isNewFloor) {
             const name = classifyFloorNameInput.value.trim();
-            const floorId = generateFloorKey(locId);
-            floorWrite = db.ref(`locations/${locId}/floors/${floorId}`).set({ name, gateways: {} }).then(() => floorId);
+            const floorId = generateFloorKey(locId, name);
+            floorWrite = db.ref(`locations/${locId}/${floorId}`).set({ createdAt: Date.now() }).then(() => floorId);
         } else {
             floorWrite = Promise.resolve(classifyFloorSelect.value);
         }
@@ -1138,14 +1189,14 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         let gwWrite;
         if (isNewGw) {
             const name = classifyGwNameInput.value.trim();
-            const gwId = generateGatewayKey(locId, floorId);
-            gwWrite = db.ref(`locations/${locId}/floors/${floorId}/gateways/${gwId}`).set({ name, rooms: {} }).then(() => gwId);
+            const gwId = generateGatewayKey(locId, floorId, name);
+            gwWrite = db.ref(`locations/${locId}/${floorId}/${gwId}`).set({ createdAt: Date.now() }).then(() => gwId);
         } else {
             gwWrite = Promise.resolve(classifyGwSelect.value);
         }
         return gwWrite.then(gwId => ({ locId, floorId, gwId }));
     }).then(({ locId, floorId, gwId }) => {
-        const roomPath = `locations/${locId}/floors/${floorId}/gateways/${gwId}/rooms/${roomNumber}`;
+        const roomPath = `locations/${locId}/${floorId}/${gwId}/rooms/${roomNumber}`;
         return db.ref(roomPath).set({ tenant: '', rfidAccess: true, status: 'locked', doorlockMac: mac }).then(() => {
             logHistory(locId, floorId, gwId, roomNumber, 'classified', currentUserLabel || 'Admin');
             currentLoc = locId;
