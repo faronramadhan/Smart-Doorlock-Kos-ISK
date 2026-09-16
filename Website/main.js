@@ -494,9 +494,32 @@ function getFloors(loc) {
     return result;
 }
 
+/* Field metadata milik gateway (bukan nama kamar) — dipakai untuk memisahkan kamar dari gatewayMac saat iterasi */
+const GATEWAY_META_FIELDS = ['gatewayMac'];
+
 /* Gateway = semua child lantai (lantai tidak punya field metadata lain, jadi tidak perlu difilter) */
 function getGateways(floor) {
     return floor || {};
+}
+
+/* Kamar = semua child gateway selain field metadata gatewayMac. Disaring juga entri null -
+   Firebase kadang merepresentasikan child bernomor sebagai array bercelah (null di slot kosong). */
+function getRooms(gw) {
+    const result = {};
+    Object.entries(gw || {}).forEach(([k, v]) => {
+        if (!GATEWAY_META_FIELDS.includes(k) && v != null) result[k] = v;
+    });
+    return result;
+}
+
+/* Key kamar = "Kamar {nomor}" langsung sebagai child gateway (tanpa wrapper "rooms") */
+function roomKey(number) {
+    return `Kamar ${number}`;
+}
+
+function roomNumberFromKey(key) {
+    const match = (key || '').match(/\d+/);
+    return match ? parseInt(match[0], 10) : NaN;
 }
 
 /* Nomor kamar mengikuti angka lantai, mis. "Lantai 2" -> kamar 201-220, "Lantai 3" -> 301-320.
@@ -518,7 +541,7 @@ function initAppData() {
         const data = snapshot.val() || {};
 
         // Skema lama (baik "gateways langsung di lokasi" maupun wrapper "floors/gateways") dimigrasikan
-        // otomatis ke skema ringkas locations/{cabang}/{lantai}/{gateway}/rooms, tanpa kehilangan data.
+        // otomatis ke skema ringkas locations/{cabang}/{lantai}/{gateway}/Kamar {n}, tanpa kehilangan data.
         const migration = migrateOldSchemaIfNeeded(data);
         if (migration) {
             migration.catch(err => console.error('Migrasi skema lokasi gagal.', err));
@@ -529,6 +552,12 @@ function initAppData() {
         if (cleanup) {
             cleanup.catch(err => console.error('Bersihkan field createdAt lama gagal.', err));
             return; // listener ini akan terpanggil lagi otomatis setelah pembersihan tersimpan
+        }
+
+        const flatten = flattenLegacyRoomsIfNeeded(data);
+        if (flatten) {
+            flatten.catch(err => console.error('Meratakan wrapper rooms lama gagal.', err));
+            return; // listener ini akan terpanggil lagi otomatis setelah perataan tersimpan
         }
 
         locationsData = data;
@@ -569,7 +598,7 @@ function initAppData() {
     }, 1000);
 }
 
-/* ===== MIGRASI: skema lama -> skema ringkas locations/{cabang}/{lantai}/{gateway}/rooms ===== */
+/* ===== MIGRASI: skema lama -> skema ringkas locations/{cabang}/{lantai}/{gateway}/Kamar {n} ===== */
 /* Menangani 2 skema lama: (1) gateways langsung di lokasi (tiap entrinya sebenarnya 1 lantai),
    (2) wrapper floors/{..}/gateways/{..}. Return Promise kalau ada yang dimigrasikan, null kalau tidak. */
 function migrateOldSchemaIfNeeded(data) {
@@ -585,7 +614,11 @@ function migrateOldSchemaIfNeeded(data) {
             Object.values(loc.gateways).forEach(oldGw => {
                 const floorKey = nextAvailableKey(usedFloorKeys, (oldGw && oldGw.name) || 'Lantai 1', LOCATION_META_FIELDS, 'Lantai');
                 usedFloorKeys[floorKey] = true;
-                updates[`locations/${locId}/${floorKey}/Gateway 1/rooms`] = (oldGw && oldGw.rooms) || {};
+                const oldRooms = (oldGw && oldGw.rooms) || {};
+                Object.entries(oldRooms).forEach(([roomNum, roomData]) => {
+                    if (roomData == null) return;
+                    updates[`locations/${locId}/${floorKey}/Gateway 1/${roomKey(roomNum)}`] = roomData;
+                });
             });
             updates[`locations/${locId}/gateways`] = null;
         } else if (loc.floors) {
@@ -600,7 +633,11 @@ function migrateOldSchemaIfNeeded(data) {
                 Object.entries(oldGateways).forEach(([gwKey, gwObj]) => {
                     const newGwKey = nextAvailableKey(usedGwKeys, (gwObj && gwObj.name) || gwKey, [], 'Gateway');
                     usedGwKeys[newGwKey] = true;
-                    updates[`locations/${locId}/${newFloorKey}/${newGwKey}/rooms`] = (gwObj && gwObj.rooms) || {};
+                    const oldRooms = (gwObj && gwObj.rooms) || {};
+                    Object.entries(oldRooms).forEach(([roomNum, roomData]) => {
+                        if (roomData == null) return;
+                        updates[`locations/${locId}/${newFloorKey}/${newGwKey}/${roomKey(roomNum)}`] = roomData;
+                    });
                 });
             });
             updates[`locations/${locId}/floors`] = null;
@@ -637,6 +674,29 @@ function stripLegacyCreatedAt(data) {
     return needsCleanup ? db.ref().update(updates) : null;
 }
 
+/* ===== PEMBERSIHAN: ratakan wrapper "rooms" lama - kamar sekarang langsung jadi child gateway ("Kamar N") ===== */
+function flattenLegacyRoomsIfNeeded(data) {
+    const updates = {};
+    let needsFlatten = false;
+
+    Object.entries(data).forEach(([locId, loc]) => {
+        Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
+            Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
+                if (gw && typeof gw === 'object' && gw.rooms) {
+                    needsFlatten = true;
+                    Object.entries(gw.rooms).forEach(([roomNum, roomData]) => {
+                        if (roomData == null) return;
+                        updates[`locations/${locId}/${floorId}/${gwId}/${roomKey(roomNum)}`] = roomData;
+                    });
+                    updates[`locations/${locId}/${floorId}/${gwId}/rooms`] = null;
+                }
+            });
+        });
+    });
+
+    return needsFlatten ? db.ref().update(updates) : null;
+}
+
 /* ===== SEED DATA AWAL ===== */
 /* Key cabang dibuat dari nama+alamat (generateLocationKey), bukan id generik seperti "loc1" */
 function seedIfEmpty() {
@@ -652,11 +712,9 @@ function seedIfEmpty() {
                 name, address,
                 "Lantai 1": {
                     "Gateway 1": {
-                        rooms: {
-                            1: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
-                            3: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
-                            5: { tenant: "", rfidAccess: true, status: "locked" }
-                        }
+                        [roomKey(1)]: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
+                        [roomKey(3)]: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
+                        [roomKey(5)]: { tenant: "", rfidAccess: true, status: "locked" }
                     }
                 }
             }
@@ -670,21 +728,22 @@ function ensureAutoLockTimers() {
     Object.entries(locationsData).forEach(([locId, loc]) => {
         Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
             Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
-                Object.entries((gw && gw.rooms) || {}).forEach(([roomNum, room]) => {
+                Object.entries(getRooms(gw)).forEach(([roomKeyStr, room]) => {
+                    const roomNum = roomNumberFromKey(roomKeyStr);
                     const timerKey = `${locId}_${floorId}_${gwId}_${roomNum}`;
 
                     if (room.status === 'unlocked' && !autoLockTimers[timerKey]) {
                         const elapsed = Date.now() - (room.unlockedAt || Date.now());
                         const remainingMs = AUTO_LOCK_SECONDS * 1000 - elapsed;
-                        const path = `locations/${locId}/${floorId}/${gwId}/rooms/${roomNum}`;
+                        const path = `locations/${locId}/${floorId}/${gwId}/${roomKeyStr}`;
 
                         if (remainingMs <= 0) {
                             db.ref(path).update({ status: 'locked', unlockedAt: null });
-                            logHistory(locId, floorId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
+                            logHistory(locId, floorId, gwId, roomNum, 'lock', 'Sistem (Auto-kunci)');
                         } else {
                             autoLockTimers[timerKey] = setTimeout(() => {
                                 db.ref(path).update({ status: 'locked', unlockedAt: null });
-                                logHistory(locId, floorId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
+                                logHistory(locId, floorId, gwId, roomNum, 'lock', 'Sistem (Auto-kunci)');
                                 delete autoLockTimers[timerKey];
                             }, remainingMs);
                         }
@@ -854,9 +913,9 @@ document.getElementById('gwModalSave').addEventListener('click', () => {
 /* ===== Helper: ambil array kamar ===== */
 function getRoomsArray() {
     if (!currentLoc || !currentFloor || !currentGw) return [];
-    const rooms = locationsData[currentLoc]?.[currentFloor]?.[currentGw]?.rooms || {};
+    const rooms = getRooms(locationsData[currentLoc]?.[currentFloor]?.[currentGw]);
     return Object.entries(rooms)
-        .map(([number, data]) => ({ number: parseInt(number), ...data }))
+        .map(([key, data]) => ({ number: roomNumberFromKey(key), ...data }))
         .sort((a, b) => a.number - b.number);
 }
 
@@ -1007,7 +1066,7 @@ function renderAll() {
 
 /* ===== Catat riwayat: disimpan nested di dalam kamar, dibatasi jumlahnya ===== */
 function logHistory(loc, floor, gw, roomNumber, action, by) {
-    const histRef = db.ref(`locations/${loc}/${floor}/${gw}/rooms/${roomNumber}/history`);
+    const histRef = db.ref(`locations/${loc}/${floor}/${gw}/${roomKey(roomNumber)}/history`);
     histRef.push({ action, by, timestamp: Date.now() });
 
     // Trim: hapus entri paling lama kalau sudah melebihi batas
@@ -1027,7 +1086,7 @@ function logHistory(loc, floor, gw, roomNumber, action, by) {
 /* ===== AKSI: Buka/Kunci Pintu ===== */
 function toggleLock(number) {
     const loc = currentLoc, floor = currentFloor, gw = currentGw;
-    const path = `locations/${loc}/${floor}/${gw}/rooms/${number}`;
+    const path = `locations/${loc}/${floor}/${gw}/${roomKey(number)}`;
     const room = getRoomsArray().find(r => r.number === number);
     const newStatus = room.status === 'locked' ? 'unlocked' : 'locked';
     const timerKey = `${loc}_${floor}_${gw}_${number}`;
@@ -1057,7 +1116,7 @@ function toggleLock(number) {
 /* ===== AKSI: Blokir/Izinkan RFID ===== */
 function toggleRfid(number) {
     const loc = currentLoc, floor = currentFloor, gw = currentGw;
-    const roomRef = db.ref(`locations/${loc}/${floor}/${gw}/rooms/${number}`);
+    const roomRef = db.ref(`locations/${loc}/${floor}/${gw}/${roomKey(number)}`);
     const room = getRoomsArray().find(r => r.number === number);
     const newAccess = !room.rfidAccess;
 
@@ -1070,7 +1129,7 @@ function toggleRfid(number) {
 function deleteRoom(number) {
     const room = getRoomsArray().find(r => r.number === number);
     if (!confirm(`Hapus Kamar ${number} (${room.tenant || 'kosong'})?`)) return;
-    db.ref(`locations/${currentLoc}/${currentFloor}/${currentGw}/rooms/${number}`).remove();
+    db.ref(`locations/${currentLoc}/${currentFloor}/${currentGw}/${roomKey(number)}`).remove();
 }
 
 /* ===== MODAL: Tambah/Edit Kamar ===== */
@@ -1111,16 +1170,16 @@ document.getElementById('modalSave').addEventListener('click', () => {
     const newNumber = parseInt(roomNumberInput.value);
     const newTenant = tenantNameInput.value.trim();
     const newRfid = rfidInput.checked;
-    const basePath = `locations/${currentLoc}/${currentFloor}/${currentGw}/rooms`;
+    const basePath = `locations/${currentLoc}/${currentFloor}/${currentGw}`;
 
     if (editingRoomNumber) {
         const existing = getRoomsArray().find(r => r.number === editingRoomNumber);
-        if (editingRoomNumber !== newNumber) db.ref(`${basePath}/${editingRoomNumber}`).remove();
+        if (editingRoomNumber !== newNumber) db.ref(`${basePath}/${roomKey(editingRoomNumber)}`).remove();
         const updated = { tenant: newTenant, rfidAccess: newRfid, status: existing?.status || 'locked' };
         if (existing?.doorlockMac) updated.doorlockMac = existing.doorlockMac;
-        db.ref(`${basePath}/${newNumber}`).set(updated);
+        db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated);
     } else {
-        db.ref(`${basePath}/${newNumber}`).set({ tenant: newTenant, rfidAccess: newRfid, status: 'locked' });
+        db.ref(`${basePath}/${roomKey(newNumber)}`).set({ tenant: newTenant, rfidAccess: newRfid, status: 'locked' });
     }
 
     closeModal();
@@ -1331,8 +1390,8 @@ function updateClassifyRoomOptions() {
 
     let usedNumbers = [];
     if (!isNewLoc && !isNewFloor && !isNewGw) {
-        const rooms = locationsData[locId]?.[floorId]?.[gwId]?.rooms || {};
-        usedNumbers = Object.keys(rooms).map(Number);
+        const rooms = getRooms(locationsData[locId]?.[floorId]?.[gwId]);
+        usedNumbers = Object.keys(rooms).map(roomNumberFromKey);
     }
 
     // Penomoran ikut angka lantai (mis. Lantai 2 -> 201-220) - kalau lantai baru, pakai nama yang sedang diketik
@@ -1404,7 +1463,7 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         }
         return gwWrite.then(gwId => ({ locId, floorId, gwId }));
     }).then(({ locId, floorId, gwId }) => {
-        const roomPath = `locations/${locId}/${floorId}/${gwId}/rooms/${roomNumber}`;
+        const roomPath = `locations/${locId}/${floorId}/${gwId}/${roomKey(roomNumber)}`;
         return db.ref(roomPath).set({ tenant: '', rfidAccess: true, status: 'locked', doorlockMac: mac }).then(() => {
             logHistory(locId, floorId, gwId, roomNumber, 'classified', currentUserLabel || 'Admin');
             currentLoc = locId;
