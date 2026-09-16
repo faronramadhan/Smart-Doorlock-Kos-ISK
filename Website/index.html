@@ -111,8 +111,14 @@
 
             <!-- Tab Lantai -->
             <div class="toolbar-row gateway-tabs-row">
+                <div class="gateway-tabs" id="floorTabs"></div>
+                <button class="btn-icon-add" id="addFloorBtn" title="Tambah Lantai">+ Lantai</button>
+            </div>
+
+            <!-- Tab Gateway (satu lantai bisa punya lebih dari 1 gateway, jangkauan ESP-NOW terbatas ~5 meter) -->
+            <div class="toolbar-row gateway-tabs-row">
                 <div class="gateway-tabs" id="gatewayTabs"></div>
-                <button class="btn-icon-add" id="addGatewayBtn" title="Tambah Lantai">+ Lantai</button>
+                <button class="btn-icon-add" id="addGatewayBtn" title="Tambah Gateway">+ Gateway</button>
             </div>
 
             <main class="content">
@@ -123,6 +129,14 @@
                         <span class="block-count" id="pendingCount">0</span>
                     </div>
                     <div id="pendingUsersList"></div>
+                </section>
+
+                <section class="block" id="pairingBlock" style="display:none;">
+                    <div class="block-head">
+                        <h2>Doorlock Menunggu Klasifikasi</h2>
+                        <span class="block-count" id="pairingCount">0</span>
+                    </div>
+                    <div id="pairingDevicesList"></div>
                 </section>
 
                 <section class="gateway-summary" id="gatewaySummary"></section>
@@ -200,17 +214,90 @@
         </div>
     </div>
 
-    <!-- ===== MODAL: Tambah Lantai/Gateway ===== -->
-    <div class="modal-overlay" id="gwModalOverlay">
+    <!-- ===== MODAL: Tambah Lantai ===== -->
+    <div class="modal-overlay" id="floorModalOverlay">
         <div class="modal">
-            <h3>Tambah Lantai (Gateway)</h3>
+            <h3>Tambah Lantai</h3>
             <label class="field">
                 <span>Nama Lantai</span>
-                <input type="text" id="gwNameInput" placeholder="Lantai 3">
+                <input type="text" id="floorNameInput" placeholder="Lantai 3">
+            </label>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="floorModalCancel">Batal</button>
+                <button class="btn-primary" id="floorModalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Tambah Gateway ===== -->
+    <div class="modal-overlay" id="gwModalOverlay">
+        <div class="modal">
+            <h3>Tambah Gateway</h3>
+            <p class="field-hint" style="margin-top:-6px;">Satu lantai bisa punya lebih dari 1 gateway kalau jangkauannya (~5 meter) tidak cukup menjangkau semua kamar.</p>
+            <label class="field">
+                <span>Nama Gateway</span>
+                <input type="text" id="gwNameInput" placeholder="Gateway 3">
             </label>
             <div class="modal-actions">
                 <button class="btn-secondary" id="gwModalCancel">Batal</button>
                 <button class="btn-primary" id="gwModalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Klasifikasikan Doorlock ===== -->
+    <div class="modal-overlay" id="classifyModalOverlay">
+        <div class="modal">
+            <h3>Klasifikasikan Doorlock</h3>
+            <p class="field-hint" style="margin-top:-6px;">MAC Doorlock: <strong class="mono" id="classifyMacLabel"></strong></p>
+
+            <label class="field">
+                <span>Cabang (Lokasi Kos)</span>
+                <select id="classifyLocSelect"></select>
+            </label>
+            <div id="classifyNewLocFields">
+                <label class="field">
+                    <span>Nama Kos Baru</span>
+                    <input type="text" id="classifyLocNameInput" placeholder="ISK House — Cabang ...">
+                </label>
+                <label class="field">
+                    <span>Alamat Lengkap</span>
+                    <input type="text" id="classifyLocAddressInput" placeholder="Jl. ..., Kecamatan, Kota">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Lantai</span>
+                <select id="classifyFloorSelect"></select>
+            </label>
+            <div id="classifyNewFloorFields">
+                <label class="field">
+                    <span>Nama Lantai Baru</span>
+                    <input type="text" id="classifyFloorNameInput" placeholder="Lantai 3">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Gateway</span>
+                <select id="classifyGwSelect"></select>
+            </label>
+            <div id="classifyNewGwFields">
+                <label class="field">
+                    <span>Nama Gateway Baru</span>
+                    <input type="text" id="classifyGwNameInput" placeholder="Gateway 3">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Nomor Kamar</span>
+                <select id="classifyRoomNumberInput"></select>
+            </label>
+
+            <p class="auth-error" id="classifyError"></p>
+
+            <div class="modal-actions">
+                <button class="btn-secondary" id="classifyModalCancel">Batal</button>
+                <button class="btn-primary" id="classifyModalSave">Simpan</button>
             </div>
         </div>
     </div>

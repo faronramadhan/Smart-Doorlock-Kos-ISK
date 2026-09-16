@@ -194,6 +194,7 @@ button, input, select { font-family: inherit; }
 .tag--unlock { background: var(--alert-soft); color: var(--alert); }
 .tag--lock { background: var(--safe-soft); color: var(--safe); }
 .tag--rfid { background: #FEF3C7; color: #B45309; }
+.tag--classify { background: var(--accent-soft); color: var(--accent); }
 
 /* ===== MODAL ===== */
 .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.4); align-items: flex-end; justify-content: center; z-index: 50; }
