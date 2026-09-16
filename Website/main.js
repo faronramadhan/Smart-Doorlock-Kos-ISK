@@ -31,6 +31,7 @@ let currentUserLabel = '';
 let userRecordRef = null;      // listener realtime ke users/{uid} milik user yang sedang login
 let pendingUsersRef = null;    // listener realtime ke daftar pendaftar yang menunggu persetujuan (khusus admin)
 let pendingDevicesRef = null;  // listener realtime ke daftar doorlock yang sudah dipairing tapi belum diklasifikasikan (khusus admin)
+let pendingGatewaysRef = null; // listener realtime ke daftar gateway yang sudah terhubung tapi belum diklasifikasikan (khusus admin)
 let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
 
 /* Username tanpa "@" (misal "AdminISK-House") diubah jadi email sintetis untuk Firebase Auth */
@@ -165,6 +166,7 @@ function showAppView(user, record) {
     initAppData();
     renderApprovalPanel();
     renderPairingPanel();
+    renderGatewayPairingPanel();
 }
 
 function showVerifyView(user) {
@@ -186,6 +188,7 @@ function showPendingView(state) {
     appView.classList.remove('visible');
     detachApprovalPanel();
     detachPairingPanel();
+    detachGatewayPairingPanel();
 
     if (state === 'rejected') {
         pendingTitle.textContent = 'Pendaftaran Ditolak';
@@ -245,6 +248,7 @@ auth.onAuthStateChanged(user => {
         detachUserRecordListener();
         detachApprovalPanel();
         detachPairingPanel();
+        detachGatewayPairingPanel();
         currentUserEmail = '';
         currentUserRole = '';
         verifyView.style.display = 'none';
@@ -370,6 +374,63 @@ function detachPairingPanel() {
     if (pairingBlock) pairingBlock.style.display = 'none';
 }
 
+/* ===== PANEL GATEWAY MENUNGGU KLASIFIKASI (khusus admin) ===== */
+/* Diisi Gateway sendiri lewat node pendingGateways/{macGateway} begitu ia menyala & terhubung ke Firebase
+   pertama kali — sebelum punya nama/lokasi/lantai, dan sebelum ada Doorlock manapun yang dipairing ke situ. */
+const gwPairingBlock = document.getElementById('gwPairingBlock');
+const pairingGatewaysList = document.getElementById('pairingGatewaysList');
+const gwPairingCountEl = document.getElementById('gwPairingCount');
+
+function renderGatewayPairingPanel() {
+    if (currentUserRole !== 'admin') {
+        detachGatewayPairingPanel();
+        return;
+    }
+    gwPairingBlock.style.display = 'block';
+    if (pendingGatewaysRef) return; // listener sudah aktif
+
+    pendingGatewaysRef = db.ref('pendingGateways');
+    pendingGatewaysRef.on('value', (snapshot) => {
+        const entries = [];
+        snapshot.forEach(child => { entries.push({ mac: child.key, ...child.val() }); return false; });
+        entries.sort((a, b) => (a.pairedAt || 0) - (b.pairedAt || 0));
+
+        gwPairingCountEl.textContent = entries.length;
+
+        if (entries.length === 0) {
+            pairingGatewaysList.innerHTML = `<p class="pending-empty">Tidak ada gateway baru yang menunggu klasifikasi.</p>`;
+            return;
+        }
+
+        pairingGatewaysList.innerHTML = entries.map(g => {
+            const date = g.pairedAt ? new Date(g.pairedAt).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) + ', ' + new Date(g.pairedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '';
+            return `
+                <div class="pending-user-item">
+                    <div class="pu-info">
+                        <div class="pu-email mono">${g.mac}</div>
+                        <div class="pu-date">Terhubung ${date}</div>
+                    </div>
+                    <div class="pu-actions">
+                        <button class="icon-btn" data-gwmac="${g.mac}">Klasifikasikan</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        pairingGatewaysList.querySelectorAll('[data-gwmac]').forEach(btn => {
+            btn.addEventListener('click', () => openClassifyGatewayModal(btn.dataset.gwmac));
+        });
+    }, (err) => {
+        console.error('Gagal membaca daftar gateway pending (pendingGateways). Cek Realtime Database Rules.', err);
+        pairingGatewaysList.innerHTML = `<p class="pending-empty">Gagal memuat daftar gateway (izin database ditolak). Cek Rules di Firebase Console.</p>`;
+    });
+}
+
+function detachGatewayPairingPanel() {
+    if (pendingGatewaysRef) { pendingGatewaysRef.off(); pendingGatewaysRef = null; }
+    if (gwPairingBlock) gwPairingBlock.style.display = 'none';
+}
+
 /* ===== ELEMEN: APP ===== */
 const locationSelect = document.getElementById('locationSelect');
 const locationAddress = document.getElementById('locationAddress');
@@ -436,6 +497,15 @@ function getFloors(loc) {
 /* Gateway = semua child lantai (lantai tidak punya field metadata lain, jadi tidak perlu difilter) */
 function getGateways(floor) {
     return floor || {};
+}
+
+/* Nomor kamar mengikuti angka lantai, mis. "Lantai 2" -> kamar 201-220, "Lantai 3" -> 301-320.
+   Kalau nama lantai tidak mengandung angka (mis. "Lantai Dasar"), pakai penomoran polos 1-20. */
+function getRoomNumberRange(floorId) {
+    const match = (floorId || '').match(/\d+/);
+    if (!match) return { start: 1, end: MAX_ROOMS };
+    const base = parseInt(match[0], 10) * 100;
+    return { start: base + 1, end: base + MAX_ROOMS };
 }
 
 function initAppData() {
@@ -1009,8 +1079,9 @@ function openModal(number = null) {
     const rooms = getRoomsArray();
     const usedNumbers = rooms.map(r => r.number);
 
+    const { start, end } = getRoomNumberRange(currentFloor);
     const availableNumbers = [];
-    for (let i = 1; i <= MAX_ROOMS; i++) {
+    for (let i = start; i <= end; i++) {
         if (!usedNumbers.includes(i) || i === number) availableNumbers.push(i);
     }
     roomNumberInput.innerHTML = availableNumbers.map(n => `<option value="${n}">Kamar ${n}</option>`).join('');
@@ -1055,8 +1126,119 @@ document.getElementById('modalSave').addEventListener('click', () => {
     closeModal();
 });
 
-/* ===== MODAL: Klasifikasikan Doorlock (cabang + lantai + gateway + nomor kamar) ===== */
+/* ===== MODAL: Klasifikasikan Gateway (cabang + lantai + nama gateway) ===== */
 const NEW_OPTION_VALUE = '__new__';
+
+const classifyGwModalOverlay = document.getElementById('classifyGwModalOverlay');
+const classifyGwMacLabel = document.getElementById('classifyGwMacLabel');
+const classifyGwLocSelect = document.getElementById('classifyGwLocSelect');
+const classifyGwNewLocFields = document.getElementById('classifyGwNewLocFields');
+const classifyGwLocNameInput = document.getElementById('classifyGwLocNameInput');
+const classifyGwLocAddressInput = document.getElementById('classifyGwLocAddressInput');
+const classifyGwFloorSelect = document.getElementById('classifyGwFloorSelect');
+const classifyGwNewFloorFields = document.getElementById('classifyGwNewFloorFields');
+const classifyGwFloorNameInput = document.getElementById('classifyGwFloorNameInput');
+const classifyGwGatewayNameInput = document.getElementById('classifyGwGatewayNameInput');
+const classifyGwError = document.getElementById('classifyGwError');
+
+let classifyingGatewayMac = null;
+
+function openClassifyGatewayModal(mac) {
+    classifyingGatewayMac = mac;
+    classifyGwMacLabel.textContent = mac;
+    classifyGwError.textContent = '';
+    classifyGwGatewayNameInput.value = '';
+
+    classifyGwLocSelect.innerHTML = Object.entries(locationsData)
+        .map(([id, loc]) => `<option value="${id}">${loc.name}</option>`).join('')
+        + `<option value="${NEW_OPTION_VALUE}">+ Cabang Baru</option>`;
+    classifyGwLocSelect.value = (currentLoc && locationsData[currentLoc]) ? currentLoc : NEW_OPTION_VALUE;
+
+    updateClassifyGwLocFields();
+    classifyGwModalOverlay.classList.add('open');
+}
+
+function updateClassifyGwLocFields() {
+    const isNewLoc = classifyGwLocSelect.value === NEW_OPTION_VALUE;
+    classifyGwNewLocFields.style.display = isNewLoc ? 'block' : 'none';
+    classifyGwLocNameInput.value = '';
+    classifyGwLocAddressInput.value = '';
+    updateClassifyGwFloorOptions();
+}
+
+function updateClassifyGwFloorOptions() {
+    const locId = classifyGwLocSelect.value;
+    const isNewLoc = locId === NEW_OPTION_VALUE;
+    const floors = isNewLoc ? {} : getFloors(locationsData[locId]);
+    const floorIds = Object.keys(floors);
+
+    classifyGwFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${id}</option>`).join('')
+        + `<option value="${NEW_OPTION_VALUE}">+ Lantai Baru</option>`;
+    classifyGwFloorSelect.value = (!isNewLoc && currentFloor && floors[currentFloor]) ? currentFloor : (floorIds[0] || NEW_OPTION_VALUE);
+
+    updateClassifyGwFloorFields();
+}
+
+function updateClassifyGwFloorFields() {
+    const isNewFloor = classifyGwFloorSelect.value === NEW_OPTION_VALUE;
+    classifyGwNewFloorFields.style.display = isNewFloor ? 'block' : 'none';
+    classifyGwFloorNameInput.value = '';
+}
+
+classifyGwLocSelect.addEventListener('change', updateClassifyGwLocFields);
+classifyGwFloorSelect.addEventListener('change', updateClassifyGwFloorFields);
+
+function closeClassifyGatewayModal() {
+    classifyGwModalOverlay.classList.remove('open');
+    classifyingGatewayMac = null;
+}
+
+document.getElementById('classifyGwModalCancel').addEventListener('click', closeClassifyGatewayModal);
+classifyGwModalOverlay.addEventListener('click', (e) => { if (e.target === classifyGwModalOverlay) closeClassifyGatewayModal(); });
+
+document.getElementById('classifyGwModalSave').addEventListener('click', () => {
+    classifyGwError.textContent = '';
+
+    const isNewLoc = classifyGwLocSelect.value === NEW_OPTION_VALUE;
+    const isNewFloor = classifyGwFloorSelect.value === NEW_OPTION_VALUE;
+    const name = classifyGwGatewayNameInput.value.trim();
+    const mac = classifyingGatewayMac;
+
+    if (!name) { classifyGwError.textContent = 'Nama gateway wajib diisi.'; return; }
+    if (isNewLoc && !classifyGwLocNameInput.value.trim()) { classifyGwError.textContent = 'Nama kos baru wajib diisi.'; return; }
+    if (isNewFloor && !classifyGwFloorNameInput.value.trim()) { classifyGwError.textContent = 'Nama lantai baru wajib diisi.'; return; }
+
+    let locWrite;
+    if (isNewLoc) {
+        const locName = classifyGwLocNameInput.value.trim();
+        const address = classifyGwLocAddressInput.value.trim();
+        const locId = generateLocationKey(locName, address);
+        locWrite = db.ref(`locations/${locId}`).set({ name: locName, address }).then(() => locId);
+    } else {
+        locWrite = Promise.resolve(classifyGwLocSelect.value);
+    }
+
+    locWrite.then(locId => {
+        // Lantai baru tidak ditulis terpisah - node-nya otomatis terbentuk lewat deep-set gateway di bawah,
+        // supaya tidak sempat tersimpan sebagai node kosong (lihat getGateways/stripLegacyCreatedAt).
+        const floorId = isNewFloor ? generateFloorKey(locId, classifyGwFloorNameInput.value.trim()) : classifyGwFloorSelect.value;
+        const gwId = generateGatewayKey(locId, floorId, name);
+
+        return db.ref(`locations/${locId}/${floorId}/${gwId}`).set({ gatewayMac: mac }).then(() => {
+            currentLoc = locId;
+            currentFloor = floorId;
+            currentGw = gwId;
+            return db.ref(`pendingGateways/${mac}`).remove();
+        });
+    }).then(() => {
+        closeClassifyGatewayModal();
+    }).catch(err => {
+        console.error('Gagal menyimpan klasifikasi gateway.', err);
+        classifyGwError.textContent = 'Gagal menyimpan, coba lagi.';
+    });
+});
+
+/* ===== MODAL: Klasifikasikan Doorlock (cabang + lantai + gateway + nomor kamar) ===== */
 
 const classifyModalOverlay = document.getElementById('classifyModalOverlay');
 const classifyMacLabel = document.getElementById('classifyMacLabel');
@@ -1153,8 +1335,12 @@ function updateClassifyRoomOptions() {
         usedNumbers = Object.keys(rooms).map(Number);
     }
 
+    // Penomoran ikut angka lantai (mis. Lantai 2 -> 201-220) - kalau lantai baru, pakai nama yang sedang diketik
+    const floorForNumbering = isNewFloor ? classifyFloorNameInput.value.trim() : floorId;
+    const { start, end } = getRoomNumberRange(floorForNumbering);
+
     const available = [];
-    for (let i = 1; i <= MAX_ROOMS; i++) {
+    for (let i = start; i <= end; i++) {
         if (!usedNumbers.includes(i)) available.push(i);
     }
     classifyRoomNumberInput.innerHTML = available.map(n => `<option value="${n}">Kamar ${n}</option>`).join('');
@@ -1162,6 +1348,7 @@ function updateClassifyRoomOptions() {
 
 classifyLocSelect.addEventListener('change', updateClassifyLocFields);
 classifyFloorSelect.addEventListener('change', updateClassifyFloorFields);
+classifyFloorNameInput.addEventListener('input', updateClassifyRoomOptions);
 classifyGwSelect.addEventListener('change', updateClassifyGwFields);
 
 function closeClassifyModal() {

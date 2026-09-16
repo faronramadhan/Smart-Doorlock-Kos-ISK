@@ -131,6 +131,14 @@
                     <div id="pendingUsersList"></div>
                 </section>
 
+                <section class="block" id="gwPairingBlock" style="display:none;">
+                    <div class="block-head">
+                        <h2>Gateway Menunggu Klasifikasi</h2>
+                        <span class="block-count" id="gwPairingCount">0</span>
+                    </div>
+                    <div id="pairingGatewaysList"></div>
+                </section>
+
                 <section class="block" id="pairingBlock" style="display:none;">
                     <div class="block-head">
                         <h2>Doorlock Menunggu Klasifikasi</h2>
@@ -241,6 +249,52 @@
             <div class="modal-actions">
                 <button class="btn-secondary" id="gwModalCancel">Batal</button>
                 <button class="btn-primary" id="gwModalSave">Simpan</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== MODAL: Klasifikasikan Gateway ===== -->
+    <div class="modal-overlay" id="classifyGwModalOverlay">
+        <div class="modal">
+            <h3>Klasifikasikan Gateway</h3>
+            <p class="field-hint" style="margin-top:-6px;">MAC Gateway: <strong class="mono" id="classifyGwMacLabel"></strong></p>
+
+            <label class="field">
+                <span>Cabang (Lokasi Kos)</span>
+                <select id="classifyGwLocSelect"></select>
+            </label>
+            <div id="classifyGwNewLocFields">
+                <label class="field">
+                    <span>Nama Kos Baru</span>
+                    <input type="text" id="classifyGwLocNameInput" placeholder="ISK House — Cabang ...">
+                </label>
+                <label class="field">
+                    <span>Alamat Lengkap</span>
+                    <input type="text" id="classifyGwLocAddressInput" placeholder="Jl. ..., Kecamatan, Kota">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Lantai</span>
+                <select id="classifyGwFloorSelect"></select>
+            </label>
+            <div id="classifyGwNewFloorFields">
+                <label class="field">
+                    <span>Nama Lantai Baru</span>
+                    <input type="text" id="classifyGwFloorNameInput" placeholder="Lantai 3">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Nama Gateway</span>
+                <input type="text" id="classifyGwGatewayNameInput" placeholder="Gateway 3">
+            </label>
+
+            <p class="auth-error" id="classifyGwError"></p>
+
+            <div class="modal-actions">
+                <button class="btn-secondary" id="classifyGwModalCancel">Batal</button>
+                <button class="btn-primary" id="classifyGwModalSave">Simpan</button>
             </div>
         </div>
     </div>
