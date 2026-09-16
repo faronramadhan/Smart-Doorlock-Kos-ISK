@@ -433,13 +433,9 @@ function getFloors(loc) {
     return result;
 }
 
-/* Gateway = semua child lantai selain field bookkeeping createdAt (dipakai supaya node lantai/gateway kosong tidak hilang dipangkas Firebase) */
+/* Gateway = semua child lantai (lantai tidak punya field metadata lain, jadi tidak perlu difilter) */
 function getGateways(floor) {
-    const result = {};
-    Object.entries(floor || {}).forEach(([k, v]) => {
-        if (k !== 'createdAt') result[k] = v;
-    });
-    return result;
+    return floor || {};
 }
 
 function initAppData() {
@@ -457,6 +453,12 @@ function initAppData() {
         if (migration) {
             migration.catch(err => console.error('Migrasi skema lokasi gagal.', err));
             return; // listener ini akan terpanggil lagi otomatis setelah migrasi tersimpan
+        }
+
+        const cleanup = stripLegacyCreatedAt(data);
+        if (cleanup) {
+            cleanup.catch(err => console.error('Bersihkan field createdAt lama gagal.', err));
+            return; // listener ini akan terpanggil lagi otomatis setelah pembersihan tersimpan
         }
 
         locationsData = data;
@@ -503,7 +505,6 @@ function initAppData() {
 function migrateOldSchemaIfNeeded(data) {
     const updates = {};
     let needsMigration = false;
-    const now = Date.now();
 
     Object.entries(data).forEach(([locId, loc]) => {
         if (!loc) return;
@@ -514,8 +515,6 @@ function migrateOldSchemaIfNeeded(data) {
             Object.values(loc.gateways).forEach(oldGw => {
                 const floorKey = nextAvailableKey(usedFloorKeys, (oldGw && oldGw.name) || 'Lantai 1', LOCATION_META_FIELDS, 'Lantai');
                 usedFloorKeys[floorKey] = true;
-                updates[`locations/${locId}/${floorKey}/createdAt`] = now;
-                updates[`locations/${locId}/${floorKey}/Gateway 1/createdAt`] = now;
                 updates[`locations/${locId}/${floorKey}/Gateway 1/rooms`] = (oldGw && oldGw.rooms) || {};
             });
             updates[`locations/${locId}/gateways`] = null;
@@ -525,14 +524,12 @@ function migrateOldSchemaIfNeeded(data) {
             Object.entries(loc.floors).forEach(([floorKey, floorObj]) => {
                 const newFloorKey = nextAvailableKey(usedFloorKeys, (floorObj && floorObj.name) || floorKey, LOCATION_META_FIELDS, 'Lantai');
                 usedFloorKeys[newFloorKey] = true;
-                updates[`locations/${locId}/${newFloorKey}/createdAt`] = now;
 
                 const oldGateways = (floorObj && floorObj.gateways) || {};
                 const usedGwKeys = {};
                 Object.entries(oldGateways).forEach(([gwKey, gwObj]) => {
-                    const newGwKey = nextAvailableKey(usedGwKeys, (gwObj && gwObj.name) || gwKey, ['createdAt'], 'Gateway');
+                    const newGwKey = nextAvailableKey(usedGwKeys, (gwObj && gwObj.name) || gwKey, [], 'Gateway');
                     usedGwKeys[newGwKey] = true;
-                    updates[`locations/${locId}/${newFloorKey}/${newGwKey}/createdAt`] = now;
                     updates[`locations/${locId}/${newFloorKey}/${newGwKey}/rooms`] = (gwObj && gwObj.rooms) || {};
                 });
             });
@@ -541,6 +538,33 @@ function migrateOldSchemaIfNeeded(data) {
     });
 
     return needsMigration ? db.ref().update(updates) : null;
+}
+
+/* ===== PEMBERSIHAN: hapus field createdAt lama di lantai/gateway yang sudah sempat tersimpan ===== */
+/* createdAt cuma dipakai sesaat supaya node lantai/gateway kosong tidak dipangkas Firebase saat baru dibuat -
+   sekarang tidak ditulis lagi, jadi sisa yang sudah kadung ada di database dibersihkan di sini.
+   Kalau sebuah lantai/gateway ternyata cuma berisi createdAt (belum ada gateway/kamar sungguhan),
+   menghapusnya membuat node itu ikut hilang - itu memang konsekuensi yang disengaja. */
+function stripLegacyCreatedAt(data) {
+    const updates = {};
+    let needsCleanup = false;
+
+    Object.entries(data).forEach(([locId, loc]) => {
+        Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
+            if (floor && Object.prototype.hasOwnProperty.call(floor, 'createdAt')) {
+                needsCleanup = true;
+                updates[`locations/${locId}/${floorId}/createdAt`] = null;
+            }
+            Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
+                if (gw && typeof gw === 'object' && Object.prototype.hasOwnProperty.call(gw, 'createdAt')) {
+                    needsCleanup = true;
+                    updates[`locations/${locId}/${floorId}/${gwId}/createdAt`] = null;
+                }
+            });
+        });
+    });
+
+    return needsCleanup ? db.ref().update(updates) : null;
 }
 
 /* ===== SEED DATA AWAL ===== */
@@ -552,15 +576,12 @@ function seedIfEmpty() {
         const name = "ISK House Kemanggisan";
         const address = "Jl. Kemanggisan Raya, Jakarta Barat";
         const key = generateLocationKey(name, address);
-        const now = Date.now();
 
         db.ref('locations').set({
             [key]: {
                 name, address,
                 "Lantai 1": {
-                    createdAt: now,
                     "Gateway 1": {
-                        createdAt: now,
                         rooms: {
                             1: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
                             3: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
@@ -711,7 +732,7 @@ document.getElementById('floorModalSave').addEventListener('click', () => {
     if (!name || !currentLoc) return;
 
     const key = generateFloorKey(currentLoc, name);
-    db.ref(`locations/${currentLoc}/${key}`).set({ createdAt: Date.now() }).then(() => {
+    db.ref(`locations/${currentLoc}/${key}`).set({}).then(() => {
         currentFloor = key;
         currentGw = null;
     });
@@ -747,7 +768,7 @@ gwModalOverlay.addEventListener('click', (e) => { if (e.target === gwModalOverla
 
 /* Key gateway = nama yang diketik admin langsung (disanitasi + di-dedup), bukan id auto seperti "Gateway 1" yang terpisah dari field name */
 function generateGatewayKey(locId, floorId, name) {
-    return nextAvailableKey(locationsData[locId]?.[floorId] || {}, name, ['createdAt'], 'Gateway');
+    return nextAvailableKey(locationsData[locId]?.[floorId] || {}, name, [], 'Gateway');
 }
 
 document.getElementById('gwModalSave').addEventListener('click', () => {
@@ -755,7 +776,7 @@ document.getElementById('gwModalSave').addEventListener('click', () => {
     if (!name || !currentLoc || !currentFloor) return;
 
     const key = generateGatewayKey(currentLoc, currentFloor, name);
-    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({ createdAt: Date.now() }).then(() => { currentGw = key; });
+    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({}).then(() => { currentGw = key; });
 
     gwModalOverlay.classList.remove('open');
 });
@@ -1180,7 +1201,7 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         if (isNewFloor) {
             const name = classifyFloorNameInput.value.trim();
             const floorId = generateFloorKey(locId, name);
-            floorWrite = db.ref(`locations/${locId}/${floorId}`).set({ createdAt: Date.now() }).then(() => floorId);
+            floorWrite = db.ref(`locations/${locId}/${floorId}`).set({}).then(() => floorId);
         } else {
             floorWrite = Promise.resolve(classifyFloorSelect.value);
         }
@@ -1190,7 +1211,7 @@ document.getElementById('classifyModalSave').addEventListener('click', () => {
         if (isNewGw) {
             const name = classifyGwNameInput.value.trim();
             const gwId = generateGatewayKey(locId, floorId, name);
-            gwWrite = db.ref(`locations/${locId}/${floorId}/${gwId}`).set({ createdAt: Date.now() }).then(() => gwId);
+            gwWrite = db.ref(`locations/${locId}/${floorId}/${gwId}`).set({}).then(() => gwId);
         } else {
             gwWrite = Promise.resolve(classifyGwSelect.value);
         }
