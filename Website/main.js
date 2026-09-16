@@ -22,6 +22,7 @@ const AUTH_EMAIL_DOMAIN = 'isk-house.local';
 
 let locationsData = {};
 let currentLoc = null;
+let currentFloor = null;
 let currentGw = null;
 let editingRoomNumber = null;
 let currentUserEmail = '';
@@ -29,6 +30,7 @@ let currentUserRole = '';
 let currentUserLabel = '';
 let userRecordRef = null;      // listener realtime ke users/{uid} milik user yang sedang login
 let pendingUsersRef = null;    // listener realtime ke daftar pendaftar yang menunggu persetujuan (khusus admin)
+let pendingDevicesRef = null;  // listener realtime ke daftar doorlock yang sudah dipairing tapi belum diklasifikasikan (khusus admin)
 let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
 
 /* Username tanpa "@" (misal "AdminISK-House") diubah jadi email sintetis untuk Firebase Auth */
@@ -162,6 +164,7 @@ function showAppView(user, record) {
     appView.classList.add('visible');
     initAppData();
     renderApprovalPanel();
+    renderPairingPanel();
 }
 
 function showVerifyView(user) {
@@ -182,6 +185,7 @@ function showPendingView(state) {
     verifyView.style.display = 'none';
     appView.classList.remove('visible');
     detachApprovalPanel();
+    detachPairingPanel();
 
     if (state === 'rejected') {
         pendingTitle.textContent = 'Pendaftaran Ditolak';
@@ -240,6 +244,7 @@ auth.onAuthStateChanged(user => {
     } else {
         detachUserRecordListener();
         detachApprovalPanel();
+        detachPairingPanel();
         currentUserEmail = '';
         currentUserRole = '';
         verifyView.style.display = 'none';
@@ -309,11 +314,69 @@ function detachApprovalPanel() {
     if (approvalBlock) approvalBlock.style.display = 'none';
 }
 
+/* ===== PANEL DOORLOCK MENUNGGU KLASIFIKASI (khusus admin) ===== */
+/* Diisi Gateway lewat node pendingDevices/{macDoorlock} begitu pairing HMAC berhasil (lihat HMAC.md) */
+const pairingBlock = document.getElementById('pairingBlock');
+const pairingDevicesList = document.getElementById('pairingDevicesList');
+const pairingCountEl = document.getElementById('pairingCount');
+
+function renderPairingPanel() {
+    if (currentUserRole !== 'admin') {
+        detachPairingPanel();
+        return;
+    }
+    pairingBlock.style.display = 'block';
+    if (pendingDevicesRef) return; // listener sudah aktif
+
+    pendingDevicesRef = db.ref('pendingDevices');
+    pendingDevicesRef.on('value', (snapshot) => {
+        const entries = [];
+        snapshot.forEach(child => { entries.push({ mac: child.key, ...child.val() }); return false; });
+        entries.sort((a, b) => (a.pairedAt || 0) - (b.pairedAt || 0));
+
+        pairingCountEl.textContent = entries.length;
+
+        if (entries.length === 0) {
+            pairingDevicesList.innerHTML = `<p class="pending-empty">Tidak ada doorlock baru yang menunggu klasifikasi.</p>`;
+            return;
+        }
+
+        pairingDevicesList.innerHTML = entries.map(d => {
+            const date = d.pairedAt ? new Date(d.pairedAt).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) + ', ' + new Date(d.pairedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '';
+            return `
+                <div class="pending-user-item">
+                    <div class="pu-info">
+                        <div class="pu-email mono">${d.mac}</div>
+                        <div class="pu-date">Gateway ${d.gatewayMac || '-'} · Dipairing ${date}</div>
+                    </div>
+                    <div class="pu-actions">
+                        <button class="icon-btn" data-mac="${d.mac}">Klasifikasikan</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        pairingDevicesList.querySelectorAll('[data-mac]').forEach(btn => {
+            btn.addEventListener('click', () => openClassifyModal(btn.dataset.mac));
+        });
+    }, (err) => {
+        console.error('Gagal membaca daftar doorlock pending (pendingDevices). Cek Realtime Database Rules.', err);
+        pairingDevicesList.innerHTML = `<p class="pending-empty">Gagal memuat daftar doorlock (izin database ditolak). Cek Rules di Firebase Console.</p>`;
+    });
+}
+
+function detachPairingPanel() {
+    if (pendingDevicesRef) { pendingDevicesRef.off(); pendingDevicesRef = null; }
+    if (pairingBlock) pairingBlock.style.display = 'none';
+}
+
 /* ===== ELEMEN: APP ===== */
 const locationSelect = document.getElementById('locationSelect');
 const locationAddress = document.getElementById('locationAddress');
 const addLocationBtn = document.getElementById('addLocationBtn');
 const deleteLocationBtn = document.getElementById('deleteLocationBtn');
+const floorTabs = document.getElementById('floorTabs');
+const addFloorBtn = document.getElementById('addFloorBtn');
 const gatewayTabs = document.getElementById('gatewayTabs');
 const addGatewayBtn = document.getElementById('addGatewayBtn');
 const gatewaySummary = document.getElementById('gatewaySummary');
@@ -332,6 +395,9 @@ const locModalOverlay = document.getElementById('locModalOverlay');
 const locNameInput = document.getElementById('locNameInput');
 const locAddressInput = document.getElementById('locAddressInput');
 
+const floorModalOverlay = document.getElementById('floorModalOverlay');
+const floorNameInput = document.getElementById('floorNameInput');
+
 const gwModalOverlay = document.getElementById('gwModalOverlay');
 const gwNameInput = document.getElementById('gwNameInput');
 
@@ -344,20 +410,41 @@ function initAppData() {
     seedIfEmpty();
 
     db.ref('locations').on('value', (snapshot) => {
-        locationsData = snapshot.val() || {};
+        const data = snapshot.val() || {};
+
+        // Skema lama (locations/{loc}/gateways langsung, tanpa lantai) dibungkus otomatis jadi "Lantai 1"
+        // supaya kos & kamar yang sudah ada tidak hilang saat upgrade ke skema lantai > 1 gateway.
+        const migration = migrateOldSchemaIfNeeded(data);
+        if (migration) {
+            migration.catch(err => console.error('Migrasi skema lokasi (gateways -> floors) gagal.', err));
+            return; // listener ini akan terpanggil lagi otomatis setelah migrasi tersimpan
+        }
+
+        locationsData = data;
 
         if (!currentLoc || !locationsData[currentLoc]) {
             currentLoc = Object.keys(locationsData)[0] || null;
         }
         if (currentLoc) {
-            const gateways = locationsData[currentLoc].gateways || {};
+            const floors = locationsData[currentLoc].floors || {};
+            if (!currentFloor || !floors[currentFloor]) {
+                currentFloor = Object.keys(floors)[0] || null;
+            }
+        } else {
+            currentFloor = null;
+        }
+        if (currentFloor) {
+            const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
             if (!currentGw || !gateways[currentGw]) {
                 currentGw = Object.keys(gateways)[0] || null;
             }
+        } else {
+            currentGw = null;
         }
 
         ensureAutoLockTimers();
         renderLocations();
+        renderFloorTabs();
         renderGatewayTabs();
         renderAll();
     });
@@ -371,6 +458,24 @@ function initAppData() {
     }, 1000);
 }
 
+/* ===== MIGRASI: skema lama (gateways langsung di bawah lokasi) -> skema baru (floors -> gateways) ===== */
+/* Satu lantai butuh > 1 gateway karena jangkauan ESP-NOW gateway cuma ~5 meter. Return Promise kalau ada yang dimigrasikan, null kalau tidak. */
+function migrateOldSchemaIfNeeded(data) {
+    const updates = {};
+    let needsMigration = false;
+
+    Object.entries(data).forEach(([locId, loc]) => {
+        if (loc && loc.gateways && !loc.floors) {
+            needsMigration = true;
+            updates[`locations/${locId}/floors/Lantai 1/name`] = 'Lantai 1';
+            updates[`locations/${locId}/floors/Lantai 1/gateways`] = loc.gateways;
+            updates[`locations/${locId}/gateways`] = null;
+        }
+    });
+
+    return needsMigration ? db.ref().update(updates) : null;
+}
+
 /* ===== SEED DATA AWAL ===== */
 function seedIfEmpty() {
     db.ref('locations').once('value', (snapshot) => {
@@ -380,11 +485,13 @@ function seedIfEmpty() {
             loc1: {
                 name: "ISK House Kemanggisan",
                 address: "Jl. Kemanggisan Raya, Jakarta Barat",
-                gateways: {
-                    gw1: { name: "Lantai 1", rooms: {
-                        1: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
-                        3: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
-                        5: { tenant: "", rfidAccess: true, status: "locked" }
+                floors: {
+                    "Lantai 1": { name: "Lantai 1", gateways: {
+                        "Gateway 1": { name: "Gateway 1", rooms: {
+                            1: { tenant: "Budi Santoso", rfidAccess: true, status: "locked" },
+                            3: { tenant: "Rian Pratama", rfidAccess: false, status: "locked" },
+                            5: { tenant: "", rfidAccess: true, status: "locked" }
+                        }}
                     }}
                 }
             }
@@ -396,31 +503,33 @@ function seedIfEmpty() {
 /* Ini juga menangani kasus refresh browser di tengah hitung mundur */
 function ensureAutoLockTimers() {
     Object.entries(locationsData).forEach(([locId, loc]) => {
-        Object.entries(loc.gateways || {}).forEach(([gwId, gw]) => {
-            Object.entries(gw.rooms || {}).forEach(([roomNum, room]) => {
-                const timerKey = `${locId}_${gwId}_${roomNum}`;
+        Object.entries(loc.floors || {}).forEach(([floorId, floor]) => {
+            Object.entries(floor.gateways || {}).forEach(([gwId, gw]) => {
+                Object.entries(gw.rooms || {}).forEach(([roomNum, room]) => {
+                    const timerKey = `${locId}_${floorId}_${gwId}_${roomNum}`;
 
-                if (room.status === 'unlocked' && !autoLockTimers[timerKey]) {
-                    const elapsed = Date.now() - (room.unlockedAt || Date.now());
-                    const remainingMs = AUTO_LOCK_SECONDS * 1000 - elapsed;
-                    const path = `locations/${locId}/gateways/${gwId}/rooms/${roomNum}`;
+                    if (room.status === 'unlocked' && !autoLockTimers[timerKey]) {
+                        const elapsed = Date.now() - (room.unlockedAt || Date.now());
+                        const remainingMs = AUTO_LOCK_SECONDS * 1000 - elapsed;
+                        const path = `locations/${locId}/floors/${floorId}/gateways/${gwId}/rooms/${roomNum}`;
 
-                    if (remainingMs <= 0) {
-                        db.ref(path).update({ status: 'locked', unlockedAt: null });
-                        logHistory(locId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
-                    } else {
-                        autoLockTimers[timerKey] = setTimeout(() => {
+                        if (remainingMs <= 0) {
                             db.ref(path).update({ status: 'locked', unlockedAt: null });
-                            logHistory(locId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
-                            delete autoLockTimers[timerKey];
-                        }, remainingMs);
+                            logHistory(locId, floorId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
+                        } else {
+                            autoLockTimers[timerKey] = setTimeout(() => {
+                                db.ref(path).update({ status: 'locked', unlockedAt: null });
+                                logHistory(locId, floorId, gwId, parseInt(roomNum), 'lock', 'Sistem (Auto-kunci)');
+                                delete autoLockTimers[timerKey];
+                            }, remainingMs);
+                        }
                     }
-                }
 
-                if (room.status === 'locked' && autoLockTimers[timerKey]) {
-                    clearTimeout(autoLockTimers[timerKey]);
-                    delete autoLockTimers[timerKey];
-                }
+                    if (room.status === 'locked' && autoLockTimers[timerKey]) {
+                        clearTimeout(autoLockTimers[timerKey]);
+                        delete autoLockTimers[timerKey];
+                    }
+                });
             });
         });
     });
@@ -441,8 +550,11 @@ function renderLocations() {
 locationSelect.addEventListener('change', () => {
     currentLoc = locationSelect.value;
     locationAddress.textContent = locationsData[currentLoc]?.address || '';
-    const gateways = locationsData[currentLoc].gateways || {};
+    const floors = locationsData[currentLoc].floors || {};
+    currentFloor = Object.keys(floors)[0] || null;
+    const gateways = currentFloor ? (floors[currentFloor].gateways || {}) : {};
     currentGw = Object.keys(gateways)[0] || null;
+    renderFloorTabs();
     renderGatewayTabs();
     renderAll();
 });
@@ -477,8 +589,9 @@ document.getElementById('locModalSave').addEventListener('click', () => {
     if (!name) return;
 
     const key = generateLocationKey(name, address);
-    db.ref(`locations/${key}`).set({ name, address, gateways: {} }).then(() => {
+    db.ref(`locations/${key}`).set({ name, address, floors: {} }).then(() => {
         currentLoc = key;
+        currentFloor = null;
         currentGw = null;
     });
 
@@ -491,13 +604,68 @@ deleteLocationBtn.addEventListener('click', () => {
     if (!confirm(`Hapus kos "${name}" beserta semua lantai & kamarnya? Tindakan ini tidak bisa dibatalkan.`)) return;
     db.ref(`locations/${currentLoc}`).remove();
     currentLoc = null;
+    currentFloor = null;
     currentGw = null;
 });
 
-/* ===== RENDER: Tab Gateway/Lantai ===== */
+/* ===== RENDER: Tab Lantai ===== */
+function renderFloorTabs() {
+    if (!currentLoc) { floorTabs.innerHTML = ''; return; }
+    const floors = locationsData[currentLoc].floors || {};
+    floorTabs.innerHTML = Object.entries(floors).map(([id, floor]) => `
+        <button class="gateway-tab ${id === currentFloor ? 'active' : ''}" data-floor="${id}">${floor.name}</button>
+    `).join('');
+
+    floorTabs.querySelectorAll('.gateway-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentFloor = btn.dataset.floor;
+            const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
+            currentGw = Object.keys(gateways)[0] || null;
+            renderGatewayTabs();
+            renderAll();
+        });
+    });
+}
+
+/* ===== MODAL: Tambah Lantai ===== */
+addFloorBtn.addEventListener('click', () => {
+    if (!currentLoc) { alert('Tambahkan lokasi kos dulu.'); return; }
+    floorNameInput.value = '';
+    floorModalOverlay.classList.add('open');
+});
+document.getElementById('floorModalCancel').addEventListener('click', () => floorModalOverlay.classList.remove('open'));
+floorModalOverlay.addEventListener('click', (e) => { if (e.target === floorModalOverlay) floorModalOverlay.classList.remove('open'); });
+
+/* Key lantai dibuat "Lantai 1", "Lantai 2", dst secara berurutan per lokasi (bukan push key acak) */
+function generateFloorKey(locId) {
+    const floors = locationsData[locId]?.floors || {};
+    let n = Object.keys(floors).length + 1;
+    let key = `Lantai ${n}`;
+    while (floors[key]) {
+        n++;
+        key = `Lantai ${n}`;
+    }
+    return key;
+}
+
+document.getElementById('floorModalSave').addEventListener('click', () => {
+    const name = floorNameInput.value.trim();
+    if (!name || !currentLoc) return;
+
+    const key = generateFloorKey(currentLoc);
+    db.ref(`locations/${currentLoc}/floors/${key}`).set({ name, gateways: {} }).then(() => {
+        currentFloor = key;
+        currentGw = null;
+    });
+
+    floorModalOverlay.classList.remove('open');
+});
+
+/* ===== RENDER: Tab Gateway ===== */
+/* Satu lantai bisa punya > 1 gateway karena jangkauan ESP-NOW gateway terbatas (~5 meter) */
 function renderGatewayTabs() {
-    if (!currentLoc) { gatewayTabs.innerHTML = ''; return; }
-    const gateways = locationsData[currentLoc].gateways || {};
+    if (!currentLoc || !currentFloor) { gatewayTabs.innerHTML = ''; return; }
+    const gateways = locationsData[currentLoc].floors[currentFloor].gateways || {};
     gatewayTabs.innerHTML = Object.entries(gateways).map(([id, gw]) => `
         <button class="gateway-tab ${id === currentGw ? 'active' : ''}" data-gw="${id}">${gw.name}</button>
     `).join('');
@@ -510,18 +678,18 @@ function renderGatewayTabs() {
     });
 }
 
-/* ===== MODAL: Tambah Gateway/Lantai ===== */
+/* ===== MODAL: Tambah Gateway ===== */
 addGatewayBtn.addEventListener('click', () => {
-    if (!currentLoc) { alert('Tambahkan lokasi kos dulu.'); return; }
+    if (!currentFloor) { alert('Tambahkan lantai dulu.'); return; }
     gwNameInput.value = '';
     gwModalOverlay.classList.add('open');
 });
 document.getElementById('gwModalCancel').addEventListener('click', () => gwModalOverlay.classList.remove('open'));
 gwModalOverlay.addEventListener('click', (e) => { if (e.target === gwModalOverlay) gwModalOverlay.classList.remove('open'); });
 
-/* Key gateway dibuat "Gateway 1", "Gateway 2", dst secara berurutan per lokasi (bukan push key acak) */
-function generateGatewayKey(locId) {
-    const gateways = locationsData[locId]?.gateways || {};
+/* Key gateway dibuat "Gateway 1", "Gateway 2", dst secara berurutan per lantai (bukan push key acak) */
+function generateGatewayKey(locId, floorId) {
+    const gateways = locationsData[locId]?.floors?.[floorId]?.gateways || {};
     let n = Object.keys(gateways).length + 1;
     let key = `Gateway ${n}`;
     while (gateways[key]) {
@@ -533,18 +701,18 @@ function generateGatewayKey(locId) {
 
 document.getElementById('gwModalSave').addEventListener('click', () => {
     const name = gwNameInput.value.trim();
-    if (!name || !currentLoc) return;
+    if (!name || !currentLoc || !currentFloor) return;
 
-    const key = generateGatewayKey(currentLoc);
-    db.ref(`locations/${currentLoc}/gateways/${key}`).set({ name, rooms: {} }).then(() => { currentGw = key; });
+    const key = generateGatewayKey(currentLoc, currentFloor);
+    db.ref(`locations/${currentLoc}/floors/${currentFloor}/gateways/${key}`).set({ name, rooms: {} }).then(() => { currentGw = key; });
 
     gwModalOverlay.classList.remove('open');
 });
 
 /* ===== Helper: ambil array kamar ===== */
 function getRoomsArray() {
-    if (!currentLoc || !currentGw) return [];
-    const rooms = locationsData[currentLoc]?.gateways?.[currentGw]?.rooms || {};
+    if (!currentLoc || !currentFloor || !currentGw) return [];
+    const rooms = locationsData[currentLoc]?.floors?.[currentFloor]?.gateways?.[currentGw]?.rooms || {};
     return Object.entries(rooms)
         .map(([number, data]) => ({ number: parseInt(number), ...data }))
         .sort((a, b) => a.number - b.number);
@@ -552,7 +720,7 @@ function getRoomsArray() {
 
 /* ===== RENDER: Ringkasan Gateway ===== */
 function renderSummary() {
-    if (!currentLoc || !currentGw) { gatewaySummary.innerHTML = ''; return; }
+    if (!currentLoc || !currentFloor || !currentGw) { gatewaySummary.innerHTML = ''; return; }
     const rooms = getRoomsArray();
     const lockedCount = rooms.filter(r => r.status === 'locked').length;
     const unlockedCount = rooms.filter(r => r.status === 'unlocked').length;
@@ -560,7 +728,7 @@ function renderSummary() {
 
     gatewaySummary.innerHTML = `
         <div>
-            <div class="gs-title">${locationsData[currentLoc].gateways[currentGw].name}</div>
+            <div class="gs-title">${locationsData[currentLoc].floors[currentFloor].gateways[currentGw].name}</div>
             <div class="gs-sub">${rooms.length}/${MAX_ROOMS} kamar terpasang</div>
         </div>
         <div class="gs-stats">
@@ -576,8 +744,13 @@ function renderRooms() {
     const rooms = getRoomsArray();
     roomCount.textContent = `${rooms.length}/${MAX_ROOMS}`;
 
-    if (!currentGw) {
+    if (!currentFloor) {
         roomList.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">Pilih atau tambahkan lantai dulu.</p>`;
+        addRoomBtn.style.display = 'none';
+        return;
+    }
+    if (!currentGw) {
+        roomList.innerHTML = `<p style="color:var(--text-muted); font-size:13px;">Pilih atau tambahkan gateway dulu.</p>`;
         addRoomBtn.style.display = 'none';
         return;
     }
@@ -655,7 +828,7 @@ function renderHistory() {
     allEntries.sort((a, b) => b.timestamp - a.timestamp);
     allEntries = allEntries.slice(0, 20); // tampilkan maksimal 20 baris terbaru di tabel
 
-    if (!currentGw || allEntries.length === 0) {
+    if (!currentFloor || !currentGw || allEntries.length === 0) {
         historyTableBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Belum ada aktivitas</td></tr>`;
         return;
     }
@@ -664,7 +837,8 @@ function renderHistory() {
         unlock: ['tag--unlock', 'Unlock'],
         lock: ['tag--lock', 'Lock'],
         rfid_block: ['tag--rfid', 'RFID Diblokir'],
-        rfid_unblock: ['tag--rfid', 'RFID Diizinkan']
+        rfid_unblock: ['tag--rfid', 'RFID Diizinkan'],
+        classified: ['tag--classify', 'Doorlock Diklasifikasikan']
     };
 
     historyTableBody.innerHTML = allEntries.map(h => {
@@ -690,8 +864,8 @@ function renderAll() {
 }
 
 /* ===== Catat riwayat: disimpan nested di dalam kamar, dibatasi jumlahnya ===== */
-function logHistory(loc, gw, roomNumber, action, by) {
-    const histRef = db.ref(`locations/${loc}/gateways/${gw}/rooms/${roomNumber}/history`);
+function logHistory(loc, floor, gw, roomNumber, action, by) {
+    const histRef = db.ref(`locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${roomNumber}/history`);
     histRef.push({ action, by, timestamp: Date.now() });
 
     // Trim: hapus entri paling lama kalau sudah melebihi batas
@@ -710,11 +884,11 @@ function logHistory(loc, gw, roomNumber, action, by) {
 
 /* ===== AKSI: Buka/Kunci Pintu ===== */
 function toggleLock(number) {
-    const loc = currentLoc, gw = currentGw;
-    const path = `locations/${loc}/gateways/${gw}/rooms/${number}`;
+    const loc = currentLoc, floor = currentFloor, gw = currentGw;
+    const path = `locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${number}`;
     const room = getRoomsArray().find(r => r.number === number);
     const newStatus = room.status === 'locked' ? 'unlocked' : 'locked';
-    const timerKey = `${loc}_${gw}_${number}`;
+    const timerKey = `${loc}_${floor}_${gw}_${number}`;
 
     if (autoLockTimers[timerKey]) {
         clearTimeout(autoLockTimers[timerKey]);
@@ -723,16 +897,16 @@ function toggleLock(number) {
 
     if (newStatus === 'unlocked') {
         db.ref(path).update({ status: 'unlocked', unlockedAt: Date.now() });
-        logHistory(loc, gw, number, 'unlock', currentUserLabel || 'Admin');
+        logHistory(loc, floor, gw, number, 'unlock', currentUserLabel || 'Admin');
 
         autoLockTimers[timerKey] = setTimeout(() => {
             db.ref(path).update({ status: 'locked', unlockedAt: null });
-            logHistory(loc, gw, number, 'lock', 'Sistem (Auto-kunci)');
+            logHistory(loc, floor, gw, number, 'lock', 'Sistem (Auto-kunci)');
             delete autoLockTimers[timerKey];
         }, AUTO_LOCK_SECONDS * 1000);
     } else {
         db.ref(path).update({ status: 'locked', unlockedAt: null });
-        logHistory(loc, gw, number, 'lock', currentUserLabel || 'Admin');
+        logHistory(loc, floor, gw, number, 'lock', currentUserLabel || 'Admin');
     }
 
     // TODO: ESP32 Gateway membaca perubahan status di path ini via HTTP polling / listener
@@ -740,13 +914,13 @@ function toggleLock(number) {
 
 /* ===== AKSI: Blokir/Izinkan RFID ===== */
 function toggleRfid(number) {
-    const loc = currentLoc, gw = currentGw;
-    const roomRef = db.ref(`locations/${loc}/gateways/${gw}/rooms/${number}`);
+    const loc = currentLoc, floor = currentFloor, gw = currentGw;
+    const roomRef = db.ref(`locations/${loc}/floors/${floor}/gateways/${gw}/rooms/${number}`);
     const room = getRoomsArray().find(r => r.number === number);
     const newAccess = !room.rfidAccess;
 
     roomRef.update({ rfidAccess: newAccess });
-    logHistory(loc, gw, number, newAccess ? 'rfid_unblock' : 'rfid_block', currentUserLabel || 'Admin');
+    logHistory(loc, floor, gw, number, newAccess ? 'rfid_unblock' : 'rfid_block', currentUserLabel || 'Admin');
     // TODO: ESP32-C3 mengecek field rfidAccess ini sebelum mengizinkan kartu membuka pintu
 }
 
@@ -754,7 +928,7 @@ function toggleRfid(number) {
 function deleteRoom(number) {
     const room = getRoomsArray().find(r => r.number === number);
     if (!confirm(`Hapus Kamar ${number} (${room.tenant || 'kosong'})?`)) return;
-    db.ref(`locations/${currentLoc}/gateways/${currentGw}/rooms/${number}`).remove();
+    db.ref(`locations/${currentLoc}/floors/${currentFloor}/gateways/${currentGw}/rooms/${number}`).remove();
 }
 
 /* ===== MODAL: Tambah/Edit Kamar ===== */
@@ -794,17 +968,195 @@ document.getElementById('modalSave').addEventListener('click', () => {
     const newNumber = parseInt(roomNumberInput.value);
     const newTenant = tenantNameInput.value.trim();
     const newRfid = rfidInput.checked;
-    const basePath = `locations/${currentLoc}/gateways/${currentGw}/rooms`;
+    const basePath = `locations/${currentLoc}/floors/${currentFloor}/gateways/${currentGw}/rooms`;
 
     if (editingRoomNumber) {
+        const existing = getRoomsArray().find(r => r.number === editingRoomNumber);
         if (editingRoomNumber !== newNumber) db.ref(`${basePath}/${editingRoomNumber}`).remove();
-        db.ref(`${basePath}/${newNumber}`).set({
-            tenant: newTenant, rfidAccess: newRfid,
-            status: getRoomsArray().find(r => r.number === editingRoomNumber)?.status || 'locked'
-        });
+        const updated = { tenant: newTenant, rfidAccess: newRfid, status: existing?.status || 'locked' };
+        if (existing?.doorlockMac) updated.doorlockMac = existing.doorlockMac;
+        db.ref(`${basePath}/${newNumber}`).set(updated);
     } else {
         db.ref(`${basePath}/${newNumber}`).set({ tenant: newTenant, rfidAccess: newRfid, status: 'locked' });
     }
 
     closeModal();
+});
+
+/* ===== MODAL: Klasifikasikan Doorlock (cabang + lantai + gateway + nomor kamar) ===== */
+const NEW_OPTION_VALUE = '__new__';
+
+const classifyModalOverlay = document.getElementById('classifyModalOverlay');
+const classifyMacLabel = document.getElementById('classifyMacLabel');
+const classifyLocSelect = document.getElementById('classifyLocSelect');
+const classifyNewLocFields = document.getElementById('classifyNewLocFields');
+const classifyLocNameInput = document.getElementById('classifyLocNameInput');
+const classifyLocAddressInput = document.getElementById('classifyLocAddressInput');
+const classifyFloorSelect = document.getElementById('classifyFloorSelect');
+const classifyNewFloorFields = document.getElementById('classifyNewFloorFields');
+const classifyFloorNameInput = document.getElementById('classifyFloorNameInput');
+const classifyGwSelect = document.getElementById('classifyGwSelect');
+const classifyNewGwFields = document.getElementById('classifyNewGwFields');
+const classifyGwNameInput = document.getElementById('classifyGwNameInput');
+const classifyRoomNumberInput = document.getElementById('classifyRoomNumberInput');
+const classifyError = document.getElementById('classifyError');
+
+let classifyingMac = null;
+
+function openClassifyModal(mac) {
+    classifyingMac = mac;
+    classifyMacLabel.textContent = mac;
+    classifyError.textContent = '';
+
+    classifyLocSelect.innerHTML = Object.entries(locationsData)
+        .map(([id, loc]) => `<option value="${id}">${loc.name}</option>`).join('')
+        + `<option value="${NEW_OPTION_VALUE}">+ Cabang Baru</option>`;
+    classifyLocSelect.value = (currentLoc && locationsData[currentLoc]) ? currentLoc : NEW_OPTION_VALUE;
+
+    updateClassifyLocFields();
+    classifyModalOverlay.classList.add('open');
+}
+
+function updateClassifyLocFields() {
+    const isNewLoc = classifyLocSelect.value === NEW_OPTION_VALUE;
+    classifyNewLocFields.style.display = isNewLoc ? 'block' : 'none';
+    classifyLocNameInput.value = '';
+    classifyLocAddressInput.value = '';
+    updateClassifyFloorOptions();
+}
+
+function updateClassifyFloorOptions() {
+    const locId = classifyLocSelect.value;
+    const isNewLoc = locId === NEW_OPTION_VALUE;
+    const floors = isNewLoc ? {} : (locationsData[locId]?.floors || {});
+    const floorIds = Object.keys(floors);
+
+    classifyFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${floors[id].name}</option>`).join('')
+        + `<option value="${NEW_OPTION_VALUE}">+ Lantai Baru</option>`;
+    classifyFloorSelect.value = (!isNewLoc && currentFloor && floors[currentFloor]) ? currentFloor : (floorIds[0] || NEW_OPTION_VALUE);
+
+    updateClassifyFloorFields();
+}
+
+function updateClassifyFloorFields() {
+    const isNewFloor = classifyFloorSelect.value === NEW_OPTION_VALUE;
+    classifyNewFloorFields.style.display = isNewFloor ? 'block' : 'none';
+    classifyFloorNameInput.value = '';
+    updateClassifyGwOptions();
+}
+
+function updateClassifyGwOptions() {
+    const locId = classifyLocSelect.value;
+    const floorId = classifyFloorSelect.value;
+    const isNewLoc = locId === NEW_OPTION_VALUE;
+    const isNewFloor = floorId === NEW_OPTION_VALUE;
+    const gateways = (isNewLoc || isNewFloor) ? {} : (locationsData[locId]?.floors?.[floorId]?.gateways || {});
+    const gwIds = Object.keys(gateways);
+
+    classifyGwSelect.innerHTML = gwIds.map(id => `<option value="${id}">${gateways[id].name}</option>`).join('')
+        + `<option value="${NEW_OPTION_VALUE}">+ Gateway Baru</option>`;
+    classifyGwSelect.value = (!isNewLoc && !isNewFloor && currentGw && gateways[currentGw]) ? currentGw : (gwIds[0] || NEW_OPTION_VALUE);
+
+    updateClassifyGwFields();
+}
+
+function updateClassifyGwFields() {
+    const isNewGw = classifyGwSelect.value === NEW_OPTION_VALUE;
+    classifyNewGwFields.style.display = isNewGw ? 'block' : 'none';
+    classifyGwNameInput.value = '';
+    updateClassifyRoomOptions();
+}
+
+function updateClassifyRoomOptions() {
+    const locId = classifyLocSelect.value;
+    const floorId = classifyFloorSelect.value;
+    const gwId = classifyGwSelect.value;
+    const isNewLoc = locId === NEW_OPTION_VALUE;
+    const isNewFloor = floorId === NEW_OPTION_VALUE;
+    const isNewGw = gwId === NEW_OPTION_VALUE;
+
+    let usedNumbers = [];
+    if (!isNewLoc && !isNewFloor && !isNewGw) {
+        const rooms = locationsData[locId]?.floors?.[floorId]?.gateways?.[gwId]?.rooms || {};
+        usedNumbers = Object.keys(rooms).map(Number);
+    }
+
+    const available = [];
+    for (let i = 1; i <= MAX_ROOMS; i++) {
+        if (!usedNumbers.includes(i)) available.push(i);
+    }
+    classifyRoomNumberInput.innerHTML = available.map(n => `<option value="${n}">Kamar ${n}</option>`).join('');
+}
+
+classifyLocSelect.addEventListener('change', updateClassifyLocFields);
+classifyFloorSelect.addEventListener('change', updateClassifyFloorFields);
+classifyGwSelect.addEventListener('change', updateClassifyGwFields);
+
+function closeClassifyModal() {
+    classifyModalOverlay.classList.remove('open');
+    classifyingMac = null;
+}
+
+document.getElementById('classifyModalCancel').addEventListener('click', closeClassifyModal);
+classifyModalOverlay.addEventListener('click', (e) => { if (e.target === classifyModalOverlay) closeClassifyModal(); });
+
+document.getElementById('classifyModalSave').addEventListener('click', () => {
+    classifyError.textContent = '';
+
+    const isNewLoc = classifyLocSelect.value === NEW_OPTION_VALUE;
+    const isNewFloor = classifyFloorSelect.value === NEW_OPTION_VALUE;
+    const isNewGw = classifyGwSelect.value === NEW_OPTION_VALUE;
+    const roomNumber = parseInt(classifyRoomNumberInput.value);
+    const mac = classifyingMac;
+
+    if (!roomNumber) { classifyError.textContent = 'Pilih nomor kamar.'; return; }
+    if (isNewLoc && !classifyLocNameInput.value.trim()) { classifyError.textContent = 'Nama kos baru wajib diisi.'; return; }
+    if (isNewFloor && !classifyFloorNameInput.value.trim()) { classifyError.textContent = 'Nama lantai baru wajib diisi.'; return; }
+    if (isNewGw && !classifyGwNameInput.value.trim()) { classifyError.textContent = 'Nama gateway baru wajib diisi.'; return; }
+
+    let locWrite;
+    if (isNewLoc) {
+        const name = classifyLocNameInput.value.trim();
+        const address = classifyLocAddressInput.value.trim();
+        const locId = generateLocationKey(name, address);
+        locWrite = db.ref(`locations/${locId}`).set({ name, address, floors: {} }).then(() => locId);
+    } else {
+        locWrite = Promise.resolve(classifyLocSelect.value);
+    }
+
+    locWrite.then(locId => {
+        let floorWrite;
+        if (isNewFloor) {
+            const name = classifyFloorNameInput.value.trim();
+            const floorId = generateFloorKey(locId);
+            floorWrite = db.ref(`locations/${locId}/floors/${floorId}`).set({ name, gateways: {} }).then(() => floorId);
+        } else {
+            floorWrite = Promise.resolve(classifyFloorSelect.value);
+        }
+        return floorWrite.then(floorId => ({ locId, floorId }));
+    }).then(({ locId, floorId }) => {
+        let gwWrite;
+        if (isNewGw) {
+            const name = classifyGwNameInput.value.trim();
+            const gwId = generateGatewayKey(locId, floorId);
+            gwWrite = db.ref(`locations/${locId}/floors/${floorId}/gateways/${gwId}`).set({ name, rooms: {} }).then(() => gwId);
+        } else {
+            gwWrite = Promise.resolve(classifyGwSelect.value);
+        }
+        return gwWrite.then(gwId => ({ locId, floorId, gwId }));
+    }).then(({ locId, floorId, gwId }) => {
+        const roomPath = `locations/${locId}/floors/${floorId}/gateways/${gwId}/rooms/${roomNumber}`;
+        return db.ref(roomPath).set({ tenant: '', rfidAccess: true, status: 'locked', doorlockMac: mac }).then(() => {
+            logHistory(locId, floorId, gwId, roomNumber, 'classified', currentUserLabel || 'Admin');
+            currentLoc = locId;
+            currentFloor = floorId;
+            currentGw = gwId;
+            return db.ref(`pendingDevices/${mac}`).remove();
+        });
+    }).then(() => {
+        closeClassifyModal();
+    }).catch(err => {
+        console.error('Gagal menyimpan klasifikasi doorlock.', err);
+        classifyError.textContent = 'Gagal menyimpan, coba lagi.';
+    });
 });
