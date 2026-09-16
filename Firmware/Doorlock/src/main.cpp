@@ -1,11 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <mbedtls/md.h>
 #include <Preferences.h>
 
 #define MSG_DISCONNECT 2
+#define MSG_PING 3
 #define PAIRING_TIMEOUT 60000
+#define PING_INTERVAL 1000
+#define WIFI_CHANNEL 1
 
 uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 };
@@ -16,12 +20,33 @@ typedef struct {
   uint8_t proof[3];
 } AuthMessage;
 
+typedef struct {
+  uint16_t frame_ctrl;
+  uint16_t duration_id;
+  uint8_t addr1[6];
+  uint8_t addr2[6];
+  uint8_t addr3[6];
+  uint16_t sequence_ctrl;
+} wifi_ieee80211_mac_hdr_t;
+
 Preferences prefs;
 
 bool broadcasting = false;
 bool paired = false;
 uint8_t gatewayMac[6];
 unsigned long broadcastStartedAt = 0;
+unsigned long lastPingAt = 0;
+
+void onSniff(void *buf, wifi_promiscuous_pkt_type_t type) {
+  if (!paired || type != WIFI_PKT_MGMT) return;
+
+  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t*)buf;
+  wifi_ieee80211_mac_hdr_t *hdr = (wifi_ieee80211_mac_hdr_t*)pkt->payload;
+
+  if (memcmp(hdr->addr2, gatewayMac, 6) != 0) return;
+
+  Serial.printf("RSSI Gateway: %d dBm\n", pkt->rx_ctrl.rssi);
+}
 
 void computeProof(uint32_t nonce, uint8_t *proofOut) {
   uint8_t fullHash[32];
@@ -44,6 +69,7 @@ void loadPairing() {
   memcpy(peer.peer_addr, gatewayMac, 6);
   esp_now_add_peer(&peer);
 
+  esp_wifi_set_promiscuous(true);
   Serial.println("Sudah terhubung ke Gateway (dari penyimpanan).");
 }
 
@@ -66,6 +92,7 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
   memcpy(gatewayMac, mac, 6);
   savePairing();
 
+  esp_wifi_set_promiscuous(true);
   Serial.printf("Challenge diterima (nonce=0x%08X), proof terkirim.\n", challenge->nonce);
 }
 
@@ -77,18 +104,22 @@ void disconnectFromGateway() {
   paired = false;
   savePairing();
 
+  esp_wifi_set_promiscuous(false);
   Serial.println("Terputus dari Gateway lama.");
 }
 
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
+  esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   esp_now_init();
   esp_now_register_recv_cb(onReceive);
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, broadcastAddress, 6);
   esp_now_add_peer(&peer);
+
+  esp_wifi_set_promiscuous_rx_cb(onSniff);
 
   prefs.begin("doorlock", false);
   loadPairing();
@@ -117,5 +148,11 @@ void loop() {
     esp_now_send(broadcastAddress, (uint8_t*)TAG, sizeof(TAG));
     Serial.println("Pairing...");
     delay(500);
+  }
+
+  if (paired && millis() - lastPingAt > PING_INTERVAL) {
+    uint8_t ping = MSG_PING;
+    esp_now_send(gatewayMac, &ping, sizeof(ping));
+    lastPingAt = millis();
   }
 }

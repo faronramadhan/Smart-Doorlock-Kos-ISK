@@ -2,13 +2,17 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include <mbedtls/md.h>
 #include <Preferences.h>
+
+#define WIFI_CHANNEL 1
 
 #define MAX_PEERS 20
 #define MAX_QUEUE 20
 #define MSG_DISCONNECT 2
-#define PAIRING_TIMEOUT 60000
+#define MSG_PING 3
+#define MSG_PONG 4
 #define CHALLENGE_TIMEOUT 2000
 
 const uint8_t TAG[4] = { 0x00, 0x00, 0x00, 0x00 };
@@ -21,8 +25,7 @@ typedef struct {
 
 Preferences prefs;
 
-bool listening = false;
-unsigned long listenStartedAt = 0;
+bool listening = true;
 
 uint8_t queueMac[MAX_QUEUE][6];
 int queueCount = 0;
@@ -49,6 +52,7 @@ void savePeers() {
 
 void loadPeers() {
   peerCount = prefs.getUChar("count", 0);
+  if (peerCount > MAX_PEERS) peerCount = 0;
   prefs.getBytes("macs", peers, peerCount * 6);
 
   for (int i = 0; i < peerCount; i++) {
@@ -107,6 +111,12 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     return;
   }
 
+  if (len == 1 && data[0] == MSG_PING) {
+    uint8_t pong = MSG_PONG;
+    esp_now_send(mac, &pong, sizeof(pong));
+    return;
+  }
+
   if (!listening) return;
 
   if (len == 4 && memcmp(data, TAG, 4) == 0) {
@@ -116,7 +126,6 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
 
     memcpy(queueMac[queueCount], mac, 6);
     queueCount++;
-    listenStartedAt = millis();
 
     Serial.printf("Kandidat terdeteksi: %02X:%02X:%02X:%02X:%02X:%02X, masuk antrian.\n",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -145,13 +154,13 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
     }
 
     awaitingResponse = false;
-    listenStartedAt = millis();
   }
 }
 
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
+  esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   esp_now_init();
   esp_now_register_recv_cb(onReceive);
 
@@ -164,13 +173,7 @@ void loop() {
     String command = Serial.readStringUntil('\n');
     command.trim();
 
-    if (command == "Pairing" && !listening) {
-      listening = true;
-      listenStartedAt = millis();
-      queueCount = 0;
-      awaitingResponse = false;
-      Serial.println("Masuk mode listen...");
-    } else if (command == "Reset") {
+    if (command == "Reset") {
       resetPeers();
     } else if (command == "Status") {
       printStatus();
@@ -182,7 +185,6 @@ void loop() {
     Serial.printf("Timeout menunggu balasan dari %02X:%02X:%02X:%02X:%02X:%02X.\n",
                   currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5]);
     awaitingResponse = false;
-    listenStartedAt = millis();
   }
 
   if (listening && !awaitingResponse && queueCount > 0 && peerCount < MAX_PEERS) {
@@ -206,15 +208,5 @@ void loop() {
     Serial.printf("Challenge dikirim ke %02X:%02X:%02X:%02X:%02X:%02X (nonce=0x%08X).\n",
                   currentMac[0], currentMac[1], currentMac[2], currentMac[3], currentMac[4], currentMac[5],
                   currentNonce);
-  }
-
-  if (listening && millis() - listenStartedAt > PAIRING_TIMEOUT) {
-    listening = false;
-    queueCount = 0;
-    if (awaitingResponse) {
-      esp_now_del_peer(currentMac);
-      awaitingResponse = false;
-    }
-    Serial.println("Timeout, kembali ke mode idle.");
   }
 }
