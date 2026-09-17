@@ -13,7 +13,7 @@ PORTS = {
 }
 BAUD_RATE = 115200
 DURATION_SECONDS = 60
-OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "5 Langkah.csv")
+OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "6 Meter—Dengan Penghalang (Antenna Badag).csv")
 RSSI_PATTERN = re.compile(r"RSSI Gateway: (-?\d+) dBm")
 
 conns = {name: serial.Serial(port, BAUD_RATE, timeout=0.2) for name, port in PORTS.items()}
