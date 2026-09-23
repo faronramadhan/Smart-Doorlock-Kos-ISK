@@ -34,6 +34,8 @@ let pendingDevicesRef = null;  // listener realtime ke daftar doorlock yang suda
 let pendingGatewaysRef = null; // listener realtime ke daftar gateway yang sudah terhubung tapi belum diklasifikasikan (khusus admin)
 let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
 
+const MAX_FLOORS = 20; // batas pilihan "Lantai N" di dropdown Tambah Lantai
+
 /* Username tanpa "@" (misal "AdminISK-House") diubah jadi email sintetis untuk Firebase Auth */
 function toAuthEmail(raw) {
     const value = raw.trim();
@@ -438,8 +440,10 @@ const addLocationBtn = document.getElementById('addLocationBtn');
 const deleteLocationBtn = document.getElementById('deleteLocationBtn');
 const floorTabs = document.getElementById('floorTabs');
 const addFloorBtn = document.getElementById('addFloorBtn');
+const deleteFloorBtn = document.getElementById('deleteFloorBtn');
 const gatewayTabs = document.getElementById('gatewayTabs');
 const addGatewayBtn = document.getElementById('addGatewayBtn');
+const deleteGatewayBtn = document.getElementById('deleteGatewayBtn');
 const gatewaySummary = document.getElementById('gatewaySummary');
 const roomList = document.getElementById('roomList');
 const roomCount = document.getElementById('roomCount');
@@ -455,12 +459,18 @@ const rfidInput = document.getElementById('rfidInput');
 const locModalOverlay = document.getElementById('locModalOverlay');
 const locNameInput = document.getElementById('locNameInput');
 const locAddressInput = document.getElementById('locAddressInput');
+const locModalError = document.getElementById('locModalError');
 
 const floorModalOverlay = document.getElementById('floorModalOverlay');
 const floorNameInput = document.getElementById('floorNameInput');
+const floorNameMenu = document.getElementById('floorNameMenu');
+const floorModalError = document.getElementById('floorModalError');
 
 const gwModalOverlay = document.getElementById('gwModalOverlay');
 const gwNameInput = document.getElementById('gwNameInput');
+const gwModalError = document.getElementById('gwModalError');
+
+const roomModalError = document.getElementById('roomModalError');
 
 let dataListenerAttached = false;
 
@@ -494,15 +504,24 @@ function getFloors(loc) {
     return result;
 }
 
-/* Field metadata milik gateway (bukan nama kamar) — dipakai untuk memisahkan kamar dari gatewayMac saat iterasi */
-const GATEWAY_META_FIELDS = ['gatewayMac'];
+/* Field metadata milik lantai (bukan nama gateway) — "createdAt" cuma placeholder supaya lantai yang masih
+   kosong (belum ada gateway) tidak dipangkas Firebase (RTDB tidak bisa menyimpan node tanpa child sama sekali) */
+const FLOOR_META_FIELDS = ['createdAt'];
 
-/* Gateway = semua child lantai (lantai tidak punya field metadata lain, jadi tidak perlu difilter) */
+/* Gateway = semua child lantai selain field metadata createdAt */
 function getGateways(floor) {
-    return floor || {};
+    const result = {};
+    Object.entries(floor || {}).forEach(([k, v]) => {
+        if (!FLOOR_META_FIELDS.includes(k)) result[k] = v;
+    });
+    return result;
 }
 
-/* Kamar = semua child gateway selain field metadata gatewayMac. Disaring juga entri null -
+/* Field metadata milik gateway (bukan nama kamar) — gatewayMac dari pairing, createdAt = placeholder yang sama
+   seperti di lantai, dipakai supaya gateway yang masih kosong (belum ada kamar) tidak dipangkas Firebase */
+const GATEWAY_META_FIELDS = ['gatewayMac', 'createdAt'];
+
+/* Kamar = semua child gateway selain field metadata gatewayMac/createdAt. Disaring juga entri null -
    Firebase kadang merepresentasikan child bernomor sebagai array bercelah (null di slot kosong). */
 function getRooms(gw) {
     const result = {};
@@ -647,23 +666,28 @@ function migrateOldSchemaIfNeeded(data) {
     return needsMigration ? db.ref().update(updates) : null;
 }
 
-/* ===== PEMBERSIHAN: hapus field createdAt lama di lantai/gateway yang sudah sempat tersimpan ===== */
-/* createdAt cuma dipakai sesaat supaya node lantai/gateway kosong tidak dipangkas Firebase saat baru dibuat -
-   sekarang tidak ditulis lagi, jadi sisa yang sudah kadung ada di database dibersihkan di sini.
-   Kalau sebuah lantai/gateway ternyata cuma berisi createdAt (belum ada gateway/kamar sungguhan),
-   menghapusnya membuat node itu ikut hilang - itu memang konsekuensi yang disengaja. */
+/* ===== PEMBERSIHAN: hapus placeholder createdAt begitu lantai/gateway sudah punya isi sungguhan ===== */
+/* createdAt dipakai di floorModalSave/gwModalSave supaya node lantai/gateway yang masih kosong tidak
+   dipangkas Firebase (RTDB tidak bisa menyimpan node tanpa child sama sekali). Begitu lantai itu sudah
+   punya gateway sungguhan, atau gateway itu sudah punya kamar sungguhan, placeholder-nya tidak diperlukan
+   lagi dan dibersihkan di sini. PENTING: hanya dihapus kalau ada child lain juga - kalau createdAt itu
+   satu-satunya field, menghapusnya akan membuat node ikut hilang (dipangkas Firebase), jadi placeholder
+   dibiarkan sampai benar-benar ada isi. */
 function stripLegacyCreatedAt(data) {
     const updates = {};
     let needsCleanup = false;
 
     Object.entries(data).forEach(([locId, loc]) => {
         Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
-            if (floor && Object.prototype.hasOwnProperty.call(floor, 'createdAt')) {
+            const gateways = getGateways(floor);
+            const floorHasRealContent = Object.keys(gateways).length > 0;
+            if (floor && Object.prototype.hasOwnProperty.call(floor, 'createdAt') && floorHasRealContent) {
                 needsCleanup = true;
                 updates[`locations/${locId}/${floorId}/createdAt`] = null;
             }
-            Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
-                if (gw && typeof gw === 'object' && Object.prototype.hasOwnProperty.call(gw, 'createdAt')) {
+            Object.entries(gateways).forEach(([gwId, gw]) => {
+                const gwHasRealContent = Object.keys(getRooms(gw)).length > 0 || !!(gw && gw.gatewayMac);
+                if (gw && typeof gw === 'object' && Object.prototype.hasOwnProperty.call(gw, 'createdAt') && gwHasRealContent) {
                     needsCleanup = true;
                     updates[`locations/${locId}/${floorId}/${gwId}/createdAt`] = null;
                 }
@@ -787,6 +811,7 @@ locationSelect.addEventListener('change', () => {
 addLocationBtn.addEventListener('click', () => {
     locNameInput.value = '';
     locAddressInput.value = '';
+    locModalError.textContent = '';
     locModalOverlay.classList.add('open');
 });
 document.getElementById('locModalCancel').addEventListener('click', () => locModalOverlay.classList.remove('open'));
@@ -799,18 +824,23 @@ function generateLocationKey(name, address) {
 }
 
 document.getElementById('locModalSave').addEventListener('click', () => {
+    locModalError.textContent = '';
     const name = locNameInput.value.trim();
     const address = locAddressInput.value.trim();
-    if (!name) return;
+    if (!name) { locModalError.textContent = 'Nama kos wajib diisi.'; return; }
 
     const key = generateLocationKey(name, address);
     db.ref(`locations/${key}`).set({ name, address }).then(() => {
         currentLoc = key;
         currentFloor = null;
         currentGw = null;
+        locModalOverlay.classList.remove('open');
+    }).catch(err => {
+        console.error('Gagal menyimpan kos baru. Cek Realtime Database Rules.', err);
+        locModalError.textContent = err.code === 'PERMISSION_DENIED'
+            ? 'Gagal menyimpan: akun Anda tidak punya izin menulis data (bukan admin/belum disetujui).'
+            : 'Gagal menyimpan, coba lagi.';
     });
-
-    locModalOverlay.classList.remove('open');
 });
 
 deleteLocationBtn.addEventListener('click', () => {
@@ -836,6 +866,7 @@ function renderFloorTabs() {
             currentFloor = btn.dataset.floor;
             const gateways = getGateways(locationsData[currentLoc][currentFloor]);
             currentGw = Object.keys(gateways)[0] || null;
+            renderFloorTabs();
             renderGatewayTabs();
             renderAll();
         });
@@ -843,30 +874,85 @@ function renderFloorTabs() {
 }
 
 /* ===== MODAL: Tambah Lantai ===== */
+/* Nama lantai dipilih dari dropdown custom "Lantai 1".."Lantai N" (bukan diketik bebas, dan bukan <select>
+   native supaya menunya selalu terbuka ke bawah - lihat .custom-select di style.css) supaya penulisannya
+   seragam - ini juga menjaga format yang dibutuhkan getRoomNumberRange() (mengambil angka dari nama lantai). */
+function setFloorDropdownValue(label) {
+    floorNameInput.textContent = label;
+    floorNameInput.dataset.value = label;
+    floorNameMenu.querySelectorAll('.custom-select-option').forEach(opt => {
+        opt.classList.toggle('active', opt.dataset.value === label);
+    });
+}
+
 addFloorBtn.addEventListener('click', () => {
     if (!currentLoc) { alert('Tambahkan lokasi kos dulu.'); return; }
-    floorNameInput.value = '';
+    floorModalError.textContent = '';
+
+    const floors = getFloors(locationsData[currentLoc]);
+    const options = [];
+    for (let i = 1; i <= MAX_FLOORS; i++) {
+        const label = `Lantai ${i}`;
+        if (!floors[label]) options.push(label);
+    }
+
+    if (options.length === 0) {
+        alert(`Maksimal ${MAX_FLOORS} lantai per kos sudah tercapai.`);
+        return;
+    }
+
+    floorNameMenu.innerHTML = options.map(label => `<div class="custom-select-option" data-value="${label}">${label}</div>`).join('');
+    floorNameMenu.querySelectorAll('.custom-select-option').forEach(opt => {
+        opt.addEventListener('click', () => {
+            setFloorDropdownValue(opt.dataset.value);
+            floorNameMenu.classList.remove('open');
+        });
+    });
+    setFloorDropdownValue(options[0]);
+    floorNameMenu.classList.remove('open');
     floorModalOverlay.classList.add('open');
 });
+
+floorNameInput.addEventListener('click', () => floorNameMenu.classList.toggle('open'));
+document.addEventListener('click', (e) => {
+    if (!document.getElementById('floorSelectWrap').contains(e.target)) floorNameMenu.classList.remove('open');
+});
+
 document.getElementById('floorModalCancel').addEventListener('click', () => floorModalOverlay.classList.remove('open'));
 floorModalOverlay.addEventListener('click', (e) => { if (e.target === floorModalOverlay) floorModalOverlay.classList.remove('open'); });
 
-/* Key lantai = nama yang diketik admin langsung (disanitasi + di-dedup), bukan id auto seperti "Lantai 1" yang terpisah dari field name */
+/* Key lantai = nama yang diketik admin langsung (disanitasi + di-dedup), bukan id auto seperti "Lantai 1" yang terpisah dari field name.
+   Dipakai juga oleh modal Klasifikasikan Gateway/Doorlock (lantai baru lewat input teks bebas di sana). */
 function generateFloorKey(locId, name) {
     return nextAvailableKey(locationsData[locId] || {}, name, LOCATION_META_FIELDS, 'Lantai');
 }
 
 document.getElementById('floorModalSave').addEventListener('click', () => {
-    const name = floorNameInput.value.trim();
-    if (!name || !currentLoc) return;
+    floorModalError.textContent = '';
+    const key = floorNameInput.dataset.value;
+    if (!key || !currentLoc) { floorModalError.textContent = 'Pilih lantai terlebih dahulu.'; return; }
 
-    const key = generateFloorKey(currentLoc, name);
-    db.ref(`locations/${currentLoc}/${key}`).set({}).then(() => {
+    // createdAt = placeholder supaya node lantai yang masih kosong (belum ada gateway) tidak dipangkas
+    // Firebase (RTDB tidak bisa menyimpan node tanpa child) - dibersihkan otomatis lewat stripLegacyCreatedAt
+    // begitu lantai ini sudah punya gateway sungguhan.
+    db.ref(`locations/${currentLoc}/${key}`).set({ createdAt: Date.now() }).then(() => {
         currentFloor = key;
         currentGw = null;
+        floorModalOverlay.classList.remove('open');
+    }).catch(err => {
+        console.error('Gagal menyimpan lantai baru. Cek Realtime Database Rules.', err);
+        floorModalError.textContent = err.code === 'PERMISSION_DENIED'
+            ? 'Gagal menyimpan: akun Anda tidak punya izin menulis data (bukan admin/belum disetujui).'
+            : 'Gagal menyimpan, coba lagi.';
     });
+});
 
-    floorModalOverlay.classList.remove('open');
+deleteFloorBtn.addEventListener('click', () => {
+    if (!currentLoc || !currentFloor) return;
+    if (!confirm(`Hapus ${currentFloor} beserta semua gateway & kamarnya? Tindakan ini tidak bisa dibatalkan.`)) return;
+    db.ref(`locations/${currentLoc}/${currentFloor}`).remove();
+    currentFloor = null;
+    currentGw = null;
 });
 
 /* ===== RENDER: Tab Gateway ===== */
@@ -881,6 +967,7 @@ function renderGatewayTabs() {
     gatewayTabs.querySelectorAll('.gateway-tab').forEach(btn => {
         btn.addEventListener('click', () => {
             currentGw = btn.dataset.gw;
+            renderGatewayTabs();
             renderAll();
         });
     });
@@ -890,6 +977,7 @@ function renderGatewayTabs() {
 addGatewayBtn.addEventListener('click', () => {
     if (!currentFloor) { alert('Tambahkan lantai dulu.'); return; }
     gwNameInput.value = '';
+    gwModalError.textContent = '';
     gwModalOverlay.classList.add('open');
 });
 document.getElementById('gwModalCancel').addEventListener('click', () => gwModalOverlay.classList.remove('open'));
@@ -901,13 +989,29 @@ function generateGatewayKey(locId, floorId, name) {
 }
 
 document.getElementById('gwModalSave').addEventListener('click', () => {
+    gwModalError.textContent = '';
     const name = gwNameInput.value.trim();
-    if (!name || !currentLoc || !currentFloor) return;
+    if (!name || !currentLoc || !currentFloor) { gwModalError.textContent = 'Nama gateway wajib diisi.'; return; }
 
     const key = generateGatewayKey(currentLoc, currentFloor, name);
-    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({}).then(() => { currentGw = key; });
+    // createdAt = placeholder yang sama seperti di lantai, supaya gateway kosong (belum ada kamar) tidak
+    // dipangkas Firebase - dibersihkan otomatis lewat stripLegacyCreatedAt begitu sudah ada kamar sungguhan.
+    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({ createdAt: Date.now() }).then(() => {
+        currentGw = key;
+        gwModalOverlay.classList.remove('open');
+    }).catch(err => {
+        console.error('Gagal menyimpan gateway baru. Cek Realtime Database Rules.', err);
+        gwModalError.textContent = err.code === 'PERMISSION_DENIED'
+            ? 'Gagal menyimpan: akun Anda tidak punya izin menulis data (bukan admin/belum disetujui).'
+            : 'Gagal menyimpan, coba lagi.';
+    });
+});
 
-    gwModalOverlay.classList.remove('open');
+deleteGatewayBtn.addEventListener('click', () => {
+    if (!currentLoc || !currentFloor || !currentGw) return;
+    if (!confirm(`Hapus ${currentGw} beserta semua kamarnya? Tindakan ini tidak bisa dibatalkan.`)) return;
+    db.ref(`locations/${currentLoc}/${currentFloor}/${currentGw}`).remove();
+    currentGw = null;
 });
 
 /* ===== Helper: ambil array kamar ===== */
@@ -1157,6 +1261,7 @@ function openModal(number = null) {
         rfidInput.checked = true;
     }
 
+    roomModalError.textContent = '';
     modalOverlay.classList.add('open');
 }
 
@@ -1167,22 +1272,32 @@ document.getElementById('modalCancel').addEventListener('click', closeModal);
 modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeModal(); });
 
 document.getElementById('modalSave').addEventListener('click', () => {
+    roomModalError.textContent = '';
     const newNumber = parseInt(roomNumberInput.value);
     const newTenant = tenantNameInput.value.trim();
     const newRfid = rfidInput.checked;
     const basePath = `locations/${currentLoc}/${currentFloor}/${currentGw}`;
 
+    let writePromise;
     if (editingRoomNumber) {
         const existing = getRoomsArray().find(r => r.number === editingRoomNumber);
-        if (editingRoomNumber !== newNumber) db.ref(`${basePath}/${roomKey(editingRoomNumber)}`).remove();
         const updated = { tenant: newTenant, rfidAccess: newRfid, status: existing?.status || 'locked' };
         if (existing?.doorlockMac) updated.doorlockMac = existing.doorlockMac;
-        db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated);
+        writePromise = editingRoomNumber !== newNumber
+            ? db.ref(`${basePath}/${roomKey(editingRoomNumber)}`).remove().then(() => db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated))
+            : db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated);
     } else {
-        db.ref(`${basePath}/${roomKey(newNumber)}`).set({ tenant: newTenant, rfidAccess: newRfid, status: 'locked' });
+        writePromise = db.ref(`${basePath}/${roomKey(newNumber)}`).set({ tenant: newTenant, rfidAccess: newRfid, status: 'locked' });
     }
 
-    closeModal();
+    writePromise.then(() => {
+        closeModal();
+    }).catch(err => {
+        console.error('Gagal menyimpan kamar. Cek Realtime Database Rules.', err);
+        roomModalError.textContent = err.code === 'PERMISSION_DENIED'
+            ? 'Gagal menyimpan: akun Anda tidak punya izin menulis data (bukan admin/belum disetujui).'
+            : 'Gagal menyimpan, coba lagi.';
+    });
 });
 
 /* ===== MODAL: Klasifikasikan Gateway (cabang + lantai + nama gateway) ===== */

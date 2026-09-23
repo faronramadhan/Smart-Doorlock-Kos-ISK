@@ -113,12 +113,14 @@
             <div class="toolbar-row gateway-tabs-row">
                 <div class="gateway-tabs" id="floorTabs"></div>
                 <button class="btn-icon-add" id="addFloorBtn" title="Tambah Lantai">+ Lantai</button>
+                <button class="btn-icon-add danger" id="deleteFloorBtn" title="Hapus Lantai Ini">Hapus</button>
             </div>
 
             <!-- Tab Gateway (satu lantai bisa punya lebih dari 1 gateway, jangkauan ESP-NOW terbatas ~5 meter) -->
             <div class="toolbar-row gateway-tabs-row">
                 <div class="gateway-tabs" id="gatewayTabs"></div>
                 <button class="btn-icon-add" id="addGatewayBtn" title="Tambah Gateway">+ Gateway</button>
+                <button class="btn-icon-add danger" id="deleteGatewayBtn" title="Hapus Gateway Ini">Hapus</button>
             </div>
 
             <main class="content">
@@ -196,6 +198,7 @@
                 </label>
             </label>
             <p class="field-hint">Matikan kalau penghuni belum membayar — kartu RFID tidak akan bisa membuka pintu.</p>
+            <p class="auth-error" id="roomModalError"></p>
             <div class="modal-actions">
                 <button class="btn-secondary" id="modalCancel">Batal</button>
                 <button class="btn-primary" id="modalSave">Simpan</button>
@@ -215,6 +218,7 @@
                 <span>Alamat Lengkap</span>
                 <input type="text" id="locAddressInput" placeholder="Jl. ..., Kecamatan, Kota">
             </label>
+            <p class="auth-error" id="locModalError"></p>
             <div class="modal-actions">
                 <button class="btn-secondary" id="locModalCancel">Batal</button>
                 <button class="btn-primary" id="locModalSave">Simpan</button>
@@ -228,8 +232,12 @@
             <h3>Tambah Lantai</h3>
             <label class="field">
                 <span>Nama Lantai</span>
-                <input type="text" id="floorNameInput" placeholder="Lantai 3">
+                <div class="custom-select" id="floorSelectWrap">
+                    <button type="button" class="custom-select-toggle" id="floorNameInput"></button>
+                    <div class="custom-select-menu" id="floorNameMenu"></div>
+                </div>
             </label>
+            <p class="auth-error" id="floorModalError"></p>
             <div class="modal-actions">
                 <button class="btn-secondary" id="floorModalCancel">Batal</button>
                 <button class="btn-primary" id="floorModalSave">Simpan</button>
@@ -246,6 +254,7 @@
                 <span>Nama Gateway</span>
                 <input type="text" id="gwNameInput" placeholder="Gateway 3">
             </label>
+            <p class="auth-error" id="gwModalError"></p>
             <div class="modal-actions">
                 <button class="btn-secondary" id="gwModalCancel">Batal</button>
                 <button class="btn-primary" id="gwModalSave">Simpan</button>
