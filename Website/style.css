@@ -207,6 +207,25 @@ button, input, select { font-family: inherit; }
     width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
     padding: 10px 12px; color: var(--text); font-size: 13.5px; outline: none;
 }
+/* Dropdown custom (bukan <select> native) - dipakai supaya menunya selalu terbuka ke bawah,
+   tidak seperti <select> browser yang bisa membuka ke atas kalau ruang di bawah dianggap sempit. */
+.custom-select { position: relative; }
+.custom-select-toggle {
+    width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
+    padding: 10px 12px; color: var(--text); font-size: 13.5px; text-align: left; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.custom-select-toggle::after { content: "▾"; color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+.custom-select-menu {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 220px;
+    overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: 0 10px 28px rgba(17,24,39,0.18); z-index: 60;
+}
+.custom-select-menu.open { display: block; }
+.custom-select-option { padding: 10px 12px; font-size: 13.5px; color: var(--text); cursor: pointer; }
+.custom-select-option:hover { background: var(--surface-2); }
+.custom-select-option.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
 .field--switch { display: flex; align-items: center; justify-content: space-between; }
 .field--switch span { margin-bottom: 0; }
 .field-hint { font-size: 11.5px; color: var(--text-muted); margin: -6px 0 16px; }
