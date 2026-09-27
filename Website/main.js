@@ -15,6 +15,7 @@ const db = firebase.database();
 
 const MAX_ROOMS = 20;
 const MAX_HISTORY_PER_ROOM = 1000; // riwayat disimpan maks 1000 terakhir per kamar
+const HISTORY_STORAGE_KEY = 'isk-history'; // riwayat hanya disimpan di localStorage browser, tidak di Firebase
 const AUTO_LOCK_SECONDS = 5;       // ganti angka ini untuk atur durasi pintu terbuka
 
 // Firebase Auth butuh format email, jadi username tanpa "@" diubah jadi email sintetis dengan domain ini
@@ -579,6 +580,12 @@ function initAppData() {
             return; // listener ini akan terpanggil lagi otomatis setelah perataan tersimpan
         }
 
+        const historyCleanup = moveFirebaseHistoryToLocal(data);
+        if (historyCleanup) {
+            historyCleanup.catch(err => console.error('Hapus node history di Firebase gagal.', err));
+            return; // listener ini akan terpanggil lagi otomatis setelah node history terhapus
+        }
+
         locationsData = data;
 
         if (!currentLoc || !locationsData[currentLoc]) {
@@ -719,6 +726,32 @@ function flattenLegacyRoomsIfNeeded(data) {
     });
 
     return needsFlatten ? db.ref().update(updates) : null;
+}
+
+/* ===== PEMBERSIHAN: pindahkan node history lama dari Firebase ke localStorage, lalu hapus dari Firebase ===== */
+function moveFirebaseHistoryToLocal(data) {
+    const updates = {};
+    const imported = [];
+    let needsCleanup = false;
+
+    Object.entries(data).forEach(([locId, loc]) => {
+        Object.entries(getFloors(loc)).forEach(([floorId, floor]) => {
+            Object.entries(getGateways(floor)).forEach(([gwId, gw]) => {
+                Object.entries(getRooms(gw)).forEach(([roomKeyStr, room]) => {
+                    if (!room || typeof room !== 'object' || !room.history) return;
+                    needsCleanup = true;
+                    Object.values(room.history).forEach(h => {
+                        if (h) imported.push({ loc: locId, floor: floorId, gw: gwId, roomNumber: roomNumberFromKey(roomKeyStr), ...h });
+                    });
+                    updates[`locations/${locId}/${floorId}/${gwId}/${roomKeyStr}/history`] = null;
+                });
+            });
+        });
+    });
+
+    if (!needsCleanup) return null;
+    saveLocalHistory(loadLocalHistory().concat(imported));
+    return db.ref().update(updates);
 }
 
 /* ===== SEED DATA AWAL ===== */
@@ -1119,16 +1152,8 @@ function renderRooms() {
 
 /* ===== RENDER: Riwayat (gabungan riwayat semua kamar di lantai ini, terbaru & lama) ===== */
 function renderHistory() {
-    const rooms = getRoomsArray();
-    let allEntries = [];
-
-    rooms.forEach(r => {
-        if (r.history) {
-            Object.values(r.history).forEach(h => {
-                allEntries.push({ ...h, roomNumber: r.number });
-            });
-        }
-    });
+    let allEntries = loadLocalHistory()
+        .filter(h => h.loc === currentLoc && h.floor === currentFloor && h.gw === currentGw);
 
     allEntries.sort((a, b) => b.timestamp - a.timestamp);
     allEntries = allEntries.slice(0, 20); // tampilkan maksimal 20 baris terbaru di tabel
@@ -1168,23 +1193,39 @@ function renderAll() {
     renderHistory();
 }
 
-/* ===== Catat riwayat: disimpan nested di dalam kamar, dibatasi jumlahnya ===== */
-function logHistory(loc, floor, gw, roomNumber, action, by) {
-    const histRef = db.ref(`locations/${loc}/${floor}/${gw}/${roomKey(roomNumber)}/history`);
-    histRef.push({ action, by, timestamp: Date.now() });
+/* ===== Riwayat: hanya disimpan di localStorage browser (tidak di Firebase), dibatasi jumlahnya per kamar ===== */
+/* Konsekuensinya riwayat hanya terlihat di browser/perangkat yang mencatatnya, dan hilang kalau data situs dihapus. */
+function loadLocalHistory() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+        return [];
+    }
+}
 
-    // Trim: hapus entri paling lama kalau sudah melebihi batas
-    histRef.orderByChild('timestamp').once('value', (snapshot) => {
-        const entries = [];
-        snapshot.forEach(child => entries.push({ key: child.key, timestamp: child.val().timestamp }));
-        if (entries.length > MAX_HISTORY_PER_ROOM) {
-            entries.sort((a, b) => a.timestamp - b.timestamp);
-            const excess = entries.length - MAX_HISTORY_PER_ROOM;
-            for (let i = 0; i < excess; i++) {
-                histRef.child(entries[i].key).remove();
-            }
-        }
-    });
+function saveLocalHistory(entries) {
+    // Trim: simpan maks MAX_HISTORY_PER_ROOM entri terbaru per kamar
+    const perRoom = {};
+    const trimmed = entries
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .filter(h => {
+            const key = `${h.loc}_${h.floor}_${h.gw}_${h.roomNumber}`;
+            perRoom[key] = (perRoom[key] || 0) + 1;
+            return perRoom[key] <= MAX_HISTORY_PER_ROOM;
+        });
+    try {
+        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+    } catch (err) {
+        console.error('Gagal menyimpan riwayat ke localStorage.', err);
+    }
+}
+
+function logHistory(loc, floor, gw, roomNumber, action, by) {
+    const entries = loadLocalHistory();
+    entries.push({ loc, floor, gw, roomNumber, action, by, timestamp: Date.now() });
+    saveLocalHistory(entries);
+    renderHistory();
 }
 
 /* ===== AKSI: Buka/Kunci Pintu ===== */
