@@ -100,6 +100,7 @@ button, input, select { font-family: inherit; }
 .btn-icon-add.danger:hover { background: var(--alert-soft); }
 
 .gateway-tabs { display: flex; gap: 6px; overflow-x: auto; flex: 1; }
+.gateway-empty { font-size: 12.5px; color: var(--text-muted); align-self: center; }
 .gateway-tab {
     flex-shrink: 0; padding: 8px 15px; border-radius: 20px;
     border: 1px solid var(--border); background: var(--surface); color: var(--text-muted);
@@ -208,6 +209,10 @@ button, input, select { font-family: inherit; }
 .pu-date { font-size: 11.5px; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; margin-top: 2px; }
 .pu-actions { display: flex; gap: 6px; }
 .pu-actions .icon-btn { flex: none; padding: 0 14px; }
+.pu-email .badge { margin-left: 6px; vertical-align: 1px; }
+.badge.user-admin { background: var(--accent); color: #fff; }
+.badge.user-active { background: var(--safe-soft); color: var(--safe); }
+.badge.user-out { background: var(--alert-soft); color: var(--alert); }
 .pending-empty { font-size: 13px; color: var(--text-muted); }
 
 /* ===== HISTORY ===== */
