@@ -4127,7 +4127,7 @@
 		)
 		(uuid "22b1771d-40ac-4f62-b854-b1abce4f8aa6")
 	)
-	(label "M+"
+	(label "M-"
 		(at 52.07 77.47 0)
 		(effects
 			(font
@@ -4327,7 +4327,7 @@
 		)
 		(uuid "e6b76c2f-4872-4698-9611-94f203a638f6")
 	)
-	(label "M-"
+	(label "M+"
 		(at 52.07 74.93 0)
 		(effects
 			(font
@@ -4632,7 +4632,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180kΩ"
+		(property "Value" "200kΩ"
 			(at 60.96 173.9899 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6121,7 +6121,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "180kΩ"
+		(property "Value" "100kΩ"
 			(at 200.66 97.7899 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6202,7 +6202,7 @@
 				)
 			)
 		)
-		(property "Value" "100kΩ"
+		(property "Value" "200kΩ"
 			(at 204.47 105.41 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6938,7 +6938,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "180kΩ"
+		(property "Value" "100kΩ"
 			(at 217.17 101.5999 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7494,7 +7494,7 @@
 				)
 			)
 		)
-		(property "Value" "100kΩ"
+		(property "Value" "200kΩ"
 			(at 220.98 110.49 90)
 			(show_name no)
 			(do_not_autoplace no)
