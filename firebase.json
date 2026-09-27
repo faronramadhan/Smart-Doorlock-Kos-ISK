@@ -5,7 +5,7 @@
   "hosting": {
     "public": "Website",
     "ignore": [
-      "Website/Firmware/**",
+      "Firmware/**",
       "**/.*",
       "**/node_modules/**"
     ],
