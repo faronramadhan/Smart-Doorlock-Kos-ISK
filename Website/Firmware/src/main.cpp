@@ -24,9 +24,26 @@
 #define MAX_QUEUE           16
 #define MAX_EVENTS          8
 
+#define HEARTBEAT_INTERVAL_MS 5000   // doorlock mengirim status (baterai + posisi kunci) tiap 5 detik
+#define HEARTBEAT_TIMEOUT_MS  15000  // 3x status tidak datang -> doorlock dianggap terputus
+#define BATTERY_LOW           20     // % -> notifikasi baterai lemah
+#define BATTERY_EMPTY         5      // % -> kalau terputus di bawah angka ini, penyebabnya dianggap baterai habis
+#define COMMAND_GRACE_MS      3000   // posisi kunci dari heartbeat diabaikan sesaat setelah perintah dikirim
+#define GATEWAY_HEARTBEAT_MS  30000  // gateway melapor "masih hidup" ke Firebase tiap 30 detik (dibaca website)
+#define SIM_AUTO_LOCK_MS      5000   // doorlock simulasi mengunci sendiri 5 detik setelah dibuka kartu RFID
+
+// Doorlock dummy: disimulasikan otomatis sejak gateway menyala (tanpa perintah "sim"), mengirim data baterai
+// tiap HEARTBEAT_INTERVAL_MS. Nilai baterai diinput manual lewat Serial Monitor ("battery 101 75").
+// Kosongkan ("") untuk mematikan.
+#define DUMMY_ROOMS           "101"  // nomor kamar, pisahkan dengan koma, mis. "101,102"
+#define DUMMY_BATTERY         100    // baterai awal doorlock dummy (%)
+
 /* Struktur database (history tidak disimpan di Firebase, hanya di localStorage website):
    locations/{cabang}/{lantai}/{gateway}/gatewayMac (opsional)
-   locations/{cabang}/{lantai}/{gateway}/Kamar {n}: { tenant, rfidAccess, status, unlockedAt, doorlockMac }
+   locations/{cabang}/{lantai}/{gateway}/Kamar {n}: { tenant, rfidAccess, status, unlockedAt, doorlockMac,
+                                                       battery, connection, connectionReason, connectionUpdatedAt }
+   locations/{cabang}/{lantai}/{gateway}/gatewayStatus: { lastSeen, lastRestartReason, lastRestartAt,
+                                                          lastDisconnectReason, lastDisconnectSeconds, lastReconnectAt }
    pendingGateways/{macGateway}: { pairedAt }
    pendingDevices/{macDoorlock}: { gatewayMac, pairedAt } */
 
@@ -48,8 +65,10 @@ enum : uint8_t {
   CMD_RFID_BLOCK = 0x04,
   EVT_LOCKED     = 0x11,  // doorlock -> gateway
   EVT_UNLOCKED   = 0x12,
+  EVT_BATTERY_SHUTDOWN = 0x13,  // doorlock pamit mati karena baterai habis
   EVT_PAIRED     = 0xF0,  // internal: hasil pairing HMAC, dari callback ke loop()
-  EVT_REJECTED   = 0xF1
+  EVT_REJECTED   = 0xF1,
+  EVT_HEARTBEAT  = 0xF2   // internal: DoorStatusMessage diterima
 };
 
 typedef struct {
@@ -57,18 +76,43 @@ typedef struct {
   uint8_t code;
 } DoorMessage;
 
+/* Status berkala doorlock -> gateway tiap HEARTBEAT_INTERVAL_MS (3 byte) */
+#define DOOR_STATUS_HEADER 0xD1
+typedef struct {
+  uint8_t header;
+  uint8_t battery;   // 0-100 %
+  uint8_t unlocked;  // 1 = terbuka, 0 = terkunci
+} DoorStatusMessage;
+
 typedef struct {
   String key;          // "Kamar 101"
   String doorlockMac;  // kosong kalau kamar belum terhubung ke doorlock
   uint8_t mac[6];
-  bool hasMac;
+  bool hasMac = false;
   String status;       // "locked" / "unlocked"
-  bool rfidAccess;
+  bool rfidAccess = true;
+
+  // Status doorlock dari heartbeat — hanya di RAM, dibawa terus saat refreshRooms()
+  bool tracked = false;           // koneksinya dipantau (sudah pernah kirim heartbeat sejak gateway menyala)
+  bool online = false;
+  int battery = -1;               // -1 = belum diketahui
+  String connectionReason;
+  unsigned long lastHeartbeatAt = 0;
+  unsigned long lastCommandAt = 0;
+
+  // Simulasi doorlock lewat Serial Monitor (perintah "sim")
+  bool simActive = false;
+  bool simSignal = true;
+  int simBattery = DUMMY_BATTERY; // hanya berubah lewat perintah "battery"
+  unsigned long simLastBeatAt = 0;
+  unsigned long simRelockAt = 0;  // jadwal kunci otomatis setelah dibuka kartu RFID
 } Room;
 
 typedef struct {
   uint8_t mac[6];
   uint8_t code;
+  uint8_t battery;
+  uint8_t unlocked;
 } PendingEvent;
 
 /* ===== STATE ===== */
@@ -87,6 +131,12 @@ bool streaming = false;
 bool roomsDirty = false;
 unsigned long lastDiscoveryAt = 0;
 unsigned long lastStreamErrorAt = 0;
+unsigned long lastGatewayBeatAt = 0;
+bool restartReported = false;
+
+// Diisi event WiFi (task terpisah) saat gateway kehilangan WiFi, dilaporkan ke Firebase setelah tersambung lagi
+volatile unsigned long wifiDropAt = 0;
+volatile uint8_t wifiDropReason = 0;
 
 Room rooms[MAX_ROOMS];
 int roomCount = 0;
@@ -172,12 +222,14 @@ Room *findRoomByDoorlock(const String &mac) {
 }
 
 /* ===== ANTRIAN KEJADIAN ===== */
-void pushEvent(const uint8_t *mac, uint8_t code) {
+void pushEvent(const uint8_t *mac, uint8_t code, uint8_t battery = 0, uint8_t unlocked = 0) {
   portENTER_CRITICAL(&mux);
   int next = (eventHead + 1) % MAX_EVENTS;
   if (next != eventTail) {
     memcpy(events[eventHead].mac, mac, 6);
     events[eventHead].code = code;
+    events[eventHead].battery = battery;
+    events[eventHead].unlocked = unlocked;
     eventHead = next;
   }
   portEXIT_CRITICAL(&mux);
@@ -200,6 +252,13 @@ void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
   // Laporan doorlock (buka/kunci). Dicek di loop() apakah MAC-nya memang terpasang di salah satu kamar.
   if (len == sizeof(DoorMessage) && data[0] == DOOR_MSG_HEADER) {
     pushEvent(mac, data[1]);
+    return;
+  }
+
+  // Status berkala doorlock (baterai + posisi kunci)
+  if (len == sizeof(DoorStatusMessage) && data[0] == DOOR_STATUS_HEADER) {
+    const DoorStatusMessage *msg = (const DoorStatusMessage*)data;
+    pushEvent(mac, EVT_HEARTBEAT, msg->battery, msg->unlocked);
     return;
   }
 
@@ -275,22 +334,35 @@ void processPairing() {
 }
 
 /* ===== PERINTAH KE DOORLOCK ===== */
-void sendDoorlockCommand(const Room &r, uint8_t code, const char *label) {
+void sendDoorlockCommand(Room &r, uint8_t code, const char *label) {
+  r.lastCommandAt = millis();
+
+  if (r.simActive) {
+    if (r.online && code == CMD_RFID_BLOCK) Serial.printf("[SIM] Doorlock %s: akses kartu RFID DIBLOKIR, kartu akan ditolak.\n", r.key.c_str());
+    else if (r.online && code == CMD_RFID_ALLOW) Serial.printf("[SIM] Doorlock %s: akses kartu RFID DIIZINKAN, kartu bisa membuka pintu.\n", r.key.c_str());
+    else if (r.online) Serial.printf("[SIM] Doorlock %s menerima perintah %s.\n", r.key.c_str(), label);
+    else Serial.printf("[CMD] %s -> %s tidak sampai, doorlock terputus (%s).\n", label, r.key.c_str(), r.connectionReason.c_str());
+    return;
+  }
   if (!r.hasMac) {
     Serial.printf("[CMD] %s -> %s dilewati (belum ada doorlock).\n", label, r.key.c_str());
     return;
+  }
+  if (r.tracked && !r.online) {
+    Serial.printf("[CMD] Peringatan: doorlock %s sedang terputus (%s), perintah mungkin tidak sampai.\n",
+                  r.key.c_str(), r.connectionReason.c_str());
   }
   DoorMessage msg = { DOOR_MSG_HEADER, code };
   esp_err_t err = esp_now_send(r.mac, (uint8_t*)&msg, sizeof(msg));
   Serial.printf("[CMD] %s -> %s (%s)%s\n", label, r.key.c_str(), r.doorlockMac.c_str(), err == ESP_OK ? "" : " GAGAL kirim");
 }
 
-void onRoomStatusChanged(const Room &r) {
+void onRoomStatusChanged(Room &r) {
   if (r.status == "unlocked") sendDoorlockCommand(r, CMD_UNLOCK, "UNLOCK");
   else sendDoorlockCommand(r, CMD_LOCK, "LOCK");
 }
 
-void onRfidAccessChanged(const Room &r) {
+void onRfidAccessChanged(Room &r) {
   if (r.rfidAccess) sendDoorlockCommand(r, CMD_RFID_ALLOW, "RFID_ALLOW");
   else sendDoorlockCommand(r, CMD_RFID_BLOCK, "RFID_BLOCK");
 }
@@ -358,6 +430,44 @@ void registerPendingGateway() {
 }
 
 /* ===== SINKRONISASI KAMAR ===== */
+void writeDoorlockState(Room &r);
+
+// Salin state yang hanya ada di RAM (koneksi, baterai, simulasi) dari data kamar lama ke yang baru dibaca
+void copyRuntimeState(Room &dst, const Room &src) {
+  dst.tracked = src.tracked;
+  dst.online = src.online;
+  dst.battery = src.battery;
+  dst.connectionReason = src.connectionReason;
+  dst.lastHeartbeatAt = src.lastHeartbeatAt;
+  dst.lastCommandAt = src.lastCommandAt;
+  dst.simActive = src.simActive;
+  dst.simSignal = src.simSignal;
+  dst.simBattery = src.simBattery;
+  dst.simRelockAt = src.simRelockAt;
+  dst.simLastBeatAt = src.simLastBeatAt;
+}
+
+bool isDummyRoom(const String &key) {
+  String list = String(DUMMY_ROOMS) + ",";
+  for (int start = 0, comma; (comma = list.indexOf(',', start)) >= 0; start = comma + 1) {
+    String number = list.substring(start, comma);
+    number.trim();
+    if (number.length() && key == "Kamar " + number) return true;
+  }
+  return false;
+}
+
+void startSimulation(Room &r, bool dummy) {
+  r.simActive = true;
+  r.simSignal = true;
+  r.simBattery = DUMMY_BATTERY;
+  r.simLastBeatAt = 0;
+  r.simRelockAt = 0;
+  Serial.printf("[SIM] %s doorlock %s dimulai (baterai %d%%), kirim data tiap %d detik. Ubah baterai: battery %s <0-100>\n",
+                dummy ? "Dummy" : "Simulasi", r.key.c_str(), r.simBattery, HEARTBEAT_INTERVAL_MS / 1000,
+                r.key.substring(6).c_str());
+}
+
 // Baca ulang seluruh node gateway (kecil, tanpa history), bandingkan dengan data lama, kirim perintah bila berubah.
 // Kamar = semua child berbentuk object (gatewayMac/createdAt otomatis terlewati), sama seperti getRooms() di website.
 void refreshRooms() {
@@ -383,9 +493,11 @@ void refreshRooms() {
   }
 
   Room fresh[MAX_ROOMS];
+  bool resync[MAX_ROOMS];
   int freshCount = 0;
   for (JsonPairConst kv : gw) {
     if (!kv.value().is<JsonObjectConst>() || freshCount >= MAX_ROOMS) continue;
+    if (strcmp(kv.key().c_str(), "gatewayStatus") == 0) continue;  // status gateway, bukan kamar
     JsonObjectConst obj = kv.value().as<JsonObjectConst>();
 
     Room r;
@@ -397,16 +509,31 @@ void refreshRooms() {
     r.hasMac = parseMac(r.doorlockMac, r.mac);
     if (r.hasMac) ensurePeer(r.mac);
 
-    // Perintah hanya dikirim untuk perubahan, bukan saat kamar pertama kali terbaca
     Room *old = findRoomByKey(r.key);
+    if (old) {
+      copyRuntimeState(r, *old);
+    } else {
+      // Pertama kali terbaca: koneksi baru dipantau setelah doorlock mengirim heartbeat pertama
+      r.battery = obj["battery"] | -1;
+      r.connectionReason = obj["connectionReason"] | "";
+      if (isDummyRoom(r.key)) startSimulation(r, true);
+    }
+
+    // Perintah hanya dikirim untuk perubahan, bukan saat kamar pertama kali terbaca
     if (old && old->status != r.status) onRoomStatusChanged(r);
     if (old && old->rfidAccess != r.rfidAccess) onRfidAccessChanged(r);
 
+    // Field status doorlock hilang dari Firebase (mis. kamar diedit dari website, yang menimpa seluruh node kamar)
+    resync[freshCount] = r.tracked && !obj["connectionReason"].is<const char*>();
     fresh[freshCount++] = r;
   }
 
   for (int i = 0; i < freshCount; i++) rooms[i] = fresh[i];
   roomCount = freshCount;
+
+  for (int i = 0; i < roomCount; i++) {
+    if (resync[i]) writeDoorlockState(rooms[i]);
+  }
 }
 
 void startStream() {
@@ -476,11 +603,190 @@ void reportDoorEvent(const String &doorlockMac, bool unlocked) {
   setRoomStatus(r, unlocked, "dilaporkan doorlock");
 }
 
+/* ===== STATUS DOORLOCK: baterai, kunci, koneksi ===== */
+void writeDoorlockState(Room &r) {
+  FirebaseJson update;
+  update.set("connection", r.online ? "connected" : "disconnected");
+  update.set("connectionReason", r.connectionReason);
+  if (r.battery >= 0) update.set("battery", r.battery);
+  update.set("connectionUpdatedAt/.sv", "timestamp");
+  if (!Firebase.RTDB.updateNode(&fbdo, dbPath(gatewayPath + "/" + r.key), &update)) printFirebaseError("Update status doorlock");
+}
+
+void markDisconnected(Room &r, const String &reason) {
+  r.online = false;
+  r.connectionReason = reason;
+  Serial.printf("[NOTIF] %s: doorlock TERPUTUS dari gateway - %s.\n", r.key.c_str(), reason.c_str());
+  writeDoorlockState(r);
+}
+
+// Status berkala dari doorlock (sungguhan lewat ESP-NOW, atau simulasi)
+void handleHeartbeat(Room &r, int battery, bool unlocked) {
+  bool changed = false;
+  r.lastHeartbeatAt = millis();
+  r.tracked = true;
+
+  if (!r.online) {
+    r.online = true;
+    r.connectionReason = "Doorlock tersambung ke gateway";
+    Serial.printf("[NOTIF] %s: doorlock TERSAMBUNG ke gateway (baterai %d%%).\n", r.key.c_str(), battery);
+    changed = true;
+  }
+  if (battery != r.battery) {
+    if (battery <= BATTERY_LOW && (r.battery < 0 || r.battery > BATTERY_LOW)) {
+      Serial.printf("[NOTIF] %s: baterai doorlock lemah (%d%%), segera ganti/isi ulang.\n", r.key.c_str(), battery);
+    }
+    r.battery = battery;
+    changed = true;
+  }
+  if (changed) writeDoorlockState(r);
+
+  // Posisi kunci fisik. Diabaikan sesaat setelah perintah dikirim supaya tidak menimpa perintah yang belum dijalankan.
+  if (unlocked != (r.status == "unlocked") && millis() - r.lastCommandAt > COMMAND_GRACE_MS) {
+    setRoomStatus(&r, unlocked, "dilaporkan doorlock");
+  }
+}
+
+// Doorlock yang berhenti mengirim heartbeat dianggap terputus; penyebabnya ditebak dari data terakhir
+void checkHeartbeatTimeouts() {
+  for (int i = 0; i < roomCount; i++) {
+    Room &r = rooms[i];
+    if (!r.tracked || !r.online || millis() - r.lastHeartbeatAt < HEARTBEAT_TIMEOUT_MS) continue;
+
+    if (r.battery >= 0 && r.battery <= BATTERY_EMPTY) {
+      markDisconnected(r, "Baterai doorlock habis (terakhir " + String(r.battery) + "%)");
+    } else {
+      markDisconnected(r, "Sinyal terputus, doorlock di luar jangkauan gateway atau ada gangguan jaringan");
+    }
+  }
+}
+
+/* ===== SIMULASI DOORLOCK (tanpa perangkat fisik) =====
+   Meniru doorlock yang mengirim heartbeat tiap HEARTBEAT_INTERVAL_MS lewat jalur yang sama dengan doorlock
+   sungguhan (handleHeartbeat), jadi notifikasi & deteksi terputus ikut teruji. */
+void runSimulations() {
+  for (int i = 0; i < roomCount; i++) {
+    Room &r = rooms[i];
+    if (!r.simActive) continue;
+
+    // Doorlock mengunci sendiri setelah dibuka kartu RFID
+    if (r.simRelockAt && millis() >= r.simRelockAt) {
+      r.simRelockAt = 0;
+      if (r.status == "unlocked") setRoomStatus(&r, false, "dikunci otomatis oleh doorlock");
+    }
+
+    // Sinyal diputus atau doorlock sudah mati -> heartbeat berhenti, checkHeartbeatTimeouts() yang mendeteksi
+    if (!r.simSignal || (r.simBattery <= 0 && !r.online)) continue;
+    if (r.simLastBeatAt != 0 && millis() - r.simLastBeatAt < HEARTBEAT_INTERVAL_MS) continue;
+    r.simLastBeatAt = millis();
+
+    if (r.simBattery == 0) {
+      // Doorlock sungguhan juga mengirim EVT_BATTERY_SHUTDOWN sebelum mati
+      r.battery = 0;
+      markDisconnected(r, "Baterai doorlock habis (0%), doorlock mati");
+      continue;
+    }
+    // Doorlock simulasi selalu menjalankan perintah terakhir, jadi posisi kuncinya = status kamar
+    handleHeartbeat(r, r.simBattery, r.status == "unlocked");
+  }
+}
+
+/* ===== STATUS GATEWAY ===== */
+const char *restartReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "Gateway dinyalakan (listrik sempat mati atau kabel dicabut)";
+    case ESP_RST_BROWNOUT: return "Tegangan listrik gateway turun (brownout)";
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      return "Gateway restart karena error program";
+    case ESP_RST_SW:       return "Gateway di-restart oleh program";
+    case ESP_RST_EXT:      return "Gateway di-reset lewat tombol reset";
+    default:               return "Gateway dinyalakan ulang (reset lewat USB / upload program)";
+  }
+}
+
+String wifiDropText(uint8_t reason) {
+  switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND:        return "WiFi tidak ditemukan (router/hotspot mati atau di luar jangkauan)";
+    case WIFI_REASON_BEACON_TIMEOUT:     return "Sinyal WiFi hilang (router/hotspot mati atau terlalu jauh)";
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "Password WiFi ditolak router";
+    default:                             return "Koneksi WiFi terputus (kode " + String(reason) + ")";
+  }
+}
+
+// Tanda "gateway masih hidup" untuk website + alasan restart / putus WiFi terakhir
+void reportGatewayStatus() {
+  FirebaseJson update;
+  update.set("lastSeen/.sv", "timestamp");
+  if (!restartReported) {
+    update.set("lastRestartReason", restartReasonText());
+    update.set("lastRestartAt/.sv", "timestamp");
+  }
+  unsigned long dropAt = wifiDropAt;
+  if (dropAt) {
+    update.set("lastDisconnectReason", wifiDropText(wifiDropReason));
+    update.set("lastDisconnectSeconds", (int)((millis() - dropAt) / 1000));
+    update.set("lastReconnectAt/.sv", "timestamp");
+  }
+
+  if (!Firebase.RTDB.updateNode(&fbdo, dbPath(gatewayPath + "/gatewayStatus"), &update)) {
+    printFirebaseError("Lapor status gateway");
+    return;
+  }
+  if (!restartReported) Serial.printf("[GATEWAY] Status online dilaporkan (%s).\n", restartReasonText());
+  if (dropAt) {
+    Serial.printf("[NOTIF] Gateway tersambung lagi setelah %lu detik terputus: %s.\n",
+                  (millis() - dropAt) / 1000, wifiDropText(wifiDropReason).c_str());
+    wifiDropAt = 0;
+  }
+  restartReported = true;
+}
+
+/* ===== SIMULASI RFID ===== */
+// Blokir/izinkan kartu RFID kamar: simpan ke Firebase (sama seperti tombol di website) lalu kirim ke doorlock
+bool setRfidAccess(Room *r, bool allowed) {
+  r->rfidAccess = allowed;  // update lokal duluan supaya refreshRooms() tidak mengirim perintah dua kali
+  FirebaseJson update;
+  update.set("rfidAccess", allowed);
+  if (!Firebase.RTDB.updateNode(&fbdo, dbPath(gatewayPath + "/" + r->key), &update)) { printFirebaseError("Update rfidAccess"); return false; }
+  Serial.printf("[GATEWAY] Kartu RFID %s %s (diubah lewat Serial Monitor).\n", r->key.c_str(), allowed ? "DIIZINKAN" : "DIBLOKIR");
+  onRfidAccessChanged(*r);
+  return true;
+}
+
+// Kartu RFID ditempel: diizinkan -> pintu terbuka lalu terkunci sendiri, diblokir -> ditolak
+void simulateCardTap(Room &r) {
+  if (r.simBattery <= 0) { Serial.printf("[SIM] Kartu ditempel di %s, tapi doorlock mati (baterai habis).\n", r.key.c_str()); return; }
+  if (!r.rfidAccess) {
+    Serial.printf("[NOTIF] %s: kartu RFID DITOLAK, akses kartu sedang diblokir.\n", r.key.c_str());
+    return;
+  }
+  if (!r.online) {
+    Serial.printf("[SIM] Kartu diterima, pintu %s terbuka, tapi doorlock terputus dari gateway sehingga tidak bisa dilaporkan.\n", r.key.c_str());
+    return;
+  }
+  Serial.printf("[NOTIF] %s: kartu RFID DITERIMA, pintu terbuka (terkunci otomatis dalam %d detik).\n", r.key.c_str(), SIM_AUTO_LOCK_MS / 1000);
+  if (setRoomStatus(&r, true, "dibuka dengan kartu RFID")) r.simRelockAt = millis() + SIM_AUTO_LOCK_MS;
+}
+
 void processEvents() {
   PendingEvent ev;
   while (popEvent(ev)) {
     String mac = macToString(ev.mac);
+    Room *r = findRoomByDoorlock(mac);
     switch (ev.code) {
+      case EVT_HEARTBEAT:
+        if (r) handleHeartbeat(*r, ev.battery, ev.unlocked);
+        break;
+      case EVT_BATTERY_SHUTDOWN:
+        if (r) {
+          r->battery = 0;
+          markDisconnected(*r, "Baterai doorlock habis, doorlock mati");
+        }
+        break;
       case EVT_PAIRED:   reportDoorlockPaired(mac); break;
       case EVT_REJECTED:
         Serial.printf("[PAIRING] %s TIDAK VALID, ditolak.\n", mac.c_str());
@@ -494,12 +800,40 @@ void processEvents() {
 }
 
 /* ===== PERINTAH SERIAL ===== */
+void printHelp() {
+  Serial.println("===== PERINTAH GATEWAY (ketik lalu Enter) =====");
+  Serial.println("Umum:");
+  Serial.println("  help                     tampilkan daftar perintah ini");
+  Serial.println("  rooms                    daftar kamar: status, RFID, baterai, koneksi doorlock");
+  Serial.println("  Pairing                  aktifkan mode pairing doorlock ESP-NOW (60 detik)");
+  Serial.println("  reset                    cari ulang lokasi gateway (hanya jika GATEWAY_PATH kosong)");
+  Serial.println("Kunci & RFID (tersimpan di Firebase, tampil di website):");
+  Serial.println("  unlock 101 / lock 101    buka / kunci Kamar 101");
+  Serial.println("  rfid 101 block           blokir kartu RFID Kamar 101");
+  Serial.println("  rfid 101 allow           izinkan kartu RFID Kamar 101");
+  Serial.println("Simulasi doorlock:");
+  Serial.println("  sim 101                  mulai simulasi doorlock Kamar 101 (dummy DUMMY_ROOMS aktif otomatis)");
+  Serial.println("  sim 101 stop             hentikan simulasi doorlock Kamar 101");
+  Serial.println("  battery 101 75           input manual baterai (0 = habis & doorlock mati, isi lagi = menyala)");
+  Serial.println("  signal 101 off / on      putus / sambung sinyal doorlock (terputus terdeteksi setelah 15 detik)");
+  Serial.println("  tap 101                  tempel kartu RFID (diizinkan = pintu terbuka, diblokir = ditolak)");
+  Serial.println("Simulasi doorlock sungguhan lewat MAC:");
+  Serial.println("  pair AA:BB:CC:DD:EE:FF   doorlock lolos pairing -> muncul di panel admin website");
+  Serial.println("  unlock AA:BB:CC:DD:EE:FF / lock AA:BB:CC:DD:EE:FF   laporan buka/kunci dari doorlock");
+}
+
 // Pairing                    -> aktifkan mode pairing ESP-NOW
 // rooms                      -> tampilkan daftar kamar yang tersinkron
 // unlock 101 / lock 101      -> ubah status Kamar 101 di Firebase + kirim perintah ke doorlock-nya
 // unlock AA:BB:CC:DD:EE:FF   -> simulasi laporan doorlock terbuka (tanpa doorlock fisik)
 // lock AA:BB:CC:DD:EE:FF     -> simulasi laporan doorlock terkunci
 // pair AA:BB:CC:DD:EE:FF     -> simulasi pairing doorlock berhasil
+// sim 101                    -> mulai simulasi doorlock Kamar 101 (tersambung, baterai 100%)
+// sim 101 stop               -> hentikan simulasi doorlock Kamar 101
+// battery 101 75             -> input manual baterai doorlock simulasi (0 = habis & mati, isi lagi = menyala)
+// rfid 101 block / allow     -> blokir/izinkan kartu RFID Kamar 101 (tersimpan di Firebase, dikirim ke doorlock)
+// tap 101                    -> simulasi kartu RFID ditempel di doorlock Kamar 101
+// signal 101 off / on        -> putus/sambung sinyal doorlock simulasi (di luar jangkauan / gangguan WiFi)
 // reset                      -> lupakan lokasi gateway & cari ulang (hanya jika GATEWAY_PATH kosong)
 void handleSerialCommand() {
   if (!Serial.available()) return;
@@ -514,13 +848,18 @@ void handleSerialCommand() {
   arg.toUpperCase();
 
   uint8_t mac[6];
-  if (command == "pairing") {
+  if (command == "help") {
+    printHelp();
+  } else if (command == "pairing") {
     startPairing();
   } else if (command == "rooms") {
     Serial.printf("Gateway %s @ %s\n", gatewayMac.c_str(), gatewayPath.length() ? gatewayPath.c_str() : "(belum diklasifikasikan)");
     for (int i = 0; i < roomCount; i++) {
-      Serial.printf("  %s | %s | RFID %s | doorlock %s\n", rooms[i].key.c_str(), rooms[i].status.c_str(),
-                    rooms[i].rfidAccess ? "izin" : "blokir", rooms[i].hasMac ? rooms[i].doorlockMac.c_str() : "-");
+      Room &r = rooms[i];
+      String battery = r.battery >= 0 ? String(r.battery) + "%" : String("-");
+      Serial.printf("  %s | %s | RFID %s | doorlock %s%s | baterai %s | %s\n", r.key.c_str(), r.status.c_str(),
+                    r.rfidAccess ? "izin" : "blokir", r.hasMac ? r.doorlockMac.c_str() : "-", r.simActive ? " (simulasi)" : "",
+                    battery.c_str(), !r.tracked ? "koneksi belum dipantau" : r.online ? "TERSAMBUNG" : ("TERPUTUS: " + r.connectionReason).c_str());
     }
   } else if (command == "reset") {
     if (useFixedPath) { Serial.println("GATEWAY_PATH diisi manual, ubah langsung di kode."); return; }
@@ -534,8 +873,51 @@ void handleSerialCommand() {
   } else if (command == "pair" || command == "unlock" || command == "lock") {
     if (!parseMac(arg, mac)) { Serial.println("Format MAC: AA:BB:CC:DD:EE:FF"); return; }
     pushEvent(mac, command == "pair" ? EVT_PAIRED : command == "unlock" ? EVT_UNLOCKED : EVT_LOCKED);
+  } else if (command == "sim" || command == "battery" || command == "signal" || command == "rfid" || command == "tap") {
+    int argSpace = arg.indexOf(' ');
+    String roomNumber = argSpace < 0 ? arg : arg.substring(0, argSpace);
+    String value = argSpace < 0 ? "" : arg.substring(argSpace + 1);
+    value.trim();
+
+    Room *r = findRoomByKey("Kamar " + roomNumber);
+    if (!r) { Serial.printf("Kamar %s tidak ada di gateway ini (cek dengan \"rooms\").\n", roomNumber.c_str()); return; }
+
+    if (command == "sim") {
+      if (value == "STOP") {
+        if (!r->simActive) { Serial.printf("%s tidak sedang disimulasikan.\n", r->key.c_str()); return; }
+        r->simActive = false;
+        markDisconnected(*r, "Simulasi doorlock dihentikan");
+        r->tracked = false;
+      } else {
+        startSimulation(*r, false);
+      }
+      return;
+    }
+
+    if (command == "rfid") {
+      if (value != "BLOCK" && value != "ALLOW") { Serial.println("Format: rfid <nomor kamar> block|allow"); return; }
+      setRfidAccess(r, value == "ALLOW");
+      return;
+    }
+
+    if (!r->simActive) { Serial.printf("Mulai simulasi dulu: sim %s\n", roomNumber.c_str()); return; }
+    if (command == "tap") {
+      simulateCardTap(*r);
+    } else if (command == "battery") {
+      if (value.isEmpty()) { Serial.println("Format: battery <nomor kamar> <0-100>"); return; }
+      r->simBattery = constrain(value.toInt(), 0, 100);
+      r->simLastBeatAt = 0;  // langsung kirim heartbeat berikutnya
+      Serial.printf("[SIM] Baterai doorlock %s diubah ke %d%%.\n", r->key.c_str(), r->simBattery);
+    } else if (value == "OFF" || value == "ON") {
+      r->simSignal = value == "ON";
+      r->simLastBeatAt = 0;
+      Serial.printf("[SIM] Sinyal doorlock %s %s.\n", r->key.c_str(),
+                    r->simSignal ? "disambung lagi" : "diputus, gateway mendeteksi terputus setelah batas waktu heartbeat");
+    } else {
+      Serial.println("Format: signal <nomor kamar> on|off");
+    }
   } else if (command.length()) {
-    Serial.println("Perintah: Pairing, rooms, reset, unlock|lock <nomor kamar>, pair|unlock|lock <MAC>");
+    Serial.printf("Perintah \"%s\" tidak dikenal. Ketik help untuk daftar perintah.\n", line.c_str());
   }
 }
 
@@ -574,7 +956,15 @@ void setup() {
 
   Firebase.reconnectNetwork(true);
   Firebase.begin(&fbConfig, &fbAuth);
-  Serial.println("Ketik \"Pairing\" untuk mulai pairing doorlock, \"rooms\" untuk lihat kamar.");
+  // Dicatat sejak setelah tersambung pertama kali, supaya percobaan awal di atas tidak ikut terhitung
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (wifiDropAt == 0) {
+      wifiDropAt = millis();
+      wifiDropReason = info.wifi_sta_disconnected.reason;
+    }
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  Serial.println("Ketik \"help\" untuk daftar perintah.");
 }
 
 void loop() {
@@ -602,4 +992,12 @@ void loop() {
     roomsDirty = false;
     refreshRooms();
   }
+
+  if (lastGatewayBeatAt == 0 || millis() - lastGatewayBeatAt >= GATEWAY_HEARTBEAT_MS || wifiDropAt) {
+    lastGatewayBeatAt = millis();
+    reportGatewayStatus();
+  }
+
+  runSimulations();
+  checkHeartbeatTimeouts();
 }
