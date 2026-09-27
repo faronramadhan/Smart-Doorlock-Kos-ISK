@@ -11,6 +11,8 @@
     --alert: #DC2626;
     --safe-soft: #EEF9F1;
     --alert-soft: #FDECEC;
+    --warn: #D97706;
+    --warn-soft: #FEF3C7;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -119,6 +121,13 @@ button, input, select { font-family: inherit; }
 .gs-stat-label { font-size: 10.5px; color: var(--text-muted); }
 .gs-stat-num.safe { color: var(--safe); }
 .gs-stat-num.alert { color: var(--alert); }
+.gs-status { flex-basis: 100%; display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; padding-top: 12px; border-top: 1px solid var(--border); }
+.gs-status .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; background: var(--text-muted); }
+.gs-status.online .dot { background: var(--safe); }
+.gs-status.offline .dot { background: var(--alert); }
+.gs-status.offline b { color: var(--alert); }
+.gs-status.unknown { color: var(--text-muted); }
+.gs-status-detail { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
 
 /* ===== BLOCK ===== */
 .block { margin-bottom: 30px; }
@@ -156,6 +165,22 @@ button, input, select { font-family: inherit; }
 .badge.unlocked { background: var(--alert-soft); color: var(--alert); }
 .badge.rfid-on { background: var(--surface-2); color: var(--text-muted); }
 .badge.rfid-off { background: var(--alert-soft); color: var(--alert); }
+.badge.conn-on { background: var(--safe-soft); color: var(--safe); }
+.badge.conn-off { background: var(--alert-soft); color: var(--alert); }
+.badge.conn-unknown { background: var(--surface-2); color: var(--text-muted); }
+
+/* Status doorlock (baterai + koneksi) dari gateway */
+.room-device { background: var(--surface-2); border-radius: 8px; padding: 8px 10px; }
+.room-device.muted { font-size: 11.5px; color: var(--text-muted); }
+.room-device-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.room-device-reason { font-size: 11.5px; color: var(--alert); margin-top: 5px; line-height: 1.35; }
+.battery { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; font-family: 'IBM Plex Mono', monospace; }
+.battery-body { position: relative; width: 26px; height: 12px; border: 1.5px solid currentColor; border-radius: 3px; padding: 1px; }
+.battery-body::after { content: ""; position: absolute; right: -4px; top: 3px; width: 2px; height: 4px; background: currentColor; border-radius: 0 1px 1px 0; }
+.battery-fill { display: block; height: 100%; border-radius: 1px; background: currentColor; }
+.battery.high { color: var(--safe); }
+.battery.mid { color: var(--warn); }
+.battery.low { color: var(--alert); }
 
 .room-actions { display: flex; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
 .icon-btn {
