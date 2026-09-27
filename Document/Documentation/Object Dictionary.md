@@ -41,7 +41,7 @@ Aturannya simpel: **kalau nambah field/konstanta/kode pesan baru, daftarin dulu 
 | Nomor kamar | Angka lantai × 100 + urutan (1–20) | Lantai 2 → `201`–`220` |
 | Key lantai | `Lantai {n}` (dipilih dari dropdown) | `Lantai 1` |
 | Key cabang | `{nama} - {alamat}`, disanitasi, maks 60 karakter | `ISK House Kemayoran - Gg H Abdullah No34, RT9RW9, Utan Panja` |
-| Key gateway | Nama yang diketik admin, disanitasi | `Gateway 2` |
+| Key gateway | Nama yang diketik admin saat klasifikasi, disanitasi; bisa diubah lewat **Ubah Nama** (node dipindah ke key baru) | `Gateway 2` |
 
 Key Firebase nggak boleh berisi `. # $ [ ] /` (dibuang oleh `sanitizeKeyPart()` di website). Key **boleh** berisi spasi & koma, jadi firmware wajib nge-encode path sebelum request (`dbPath()`).
 
@@ -69,8 +69,12 @@ locations/{cabang}
 | `email` | string | email login (username tanpa `@` jadi `{username}@isk-house.local`) | Website |
 | `label` | string | nama tampilan otomatis dari `meta/userCounter` | Website |
 | `role` | string | `admin` / `user` | Website (admin) |
-| `status` | string | `pending` / `approved` / `rejected` | Website (admin) |
+| `status` | string | `pending` / `approved` / `rejected` / `removed` (dikeluarkan admin) | Website (admin) |
 | `createdAt` | number | epoch ms | Website |
+| `removedAt` | number | waktu dikeluarkan; dihapus saat diizinkan lagi | Website (admin) |
+| `removedBy` | string | label admin yang mengeluarkan | Website (admin) |
+
+Rules: user cuma boleh **membuat** datanya sendiri sekali (`role: user`, `status: pending`); perubahan setelahnya hanya oleh admin.
 
 ### `pendingGateways/{macGateway}` dan `pendingDevices/{macDoorlock}`
 
@@ -84,7 +88,7 @@ locations/{cabang}
 
 | Field | Tipe | Nilai / Keterangan | Ditulis oleh |
 |-------|------|--------------------|--------------|
-| `gatewayMac` | string (MAC) | Kunci pencarian: gateway nyari node dengan `gatewayMac` = MAC-nya | Website (klasifikasi) |
+| `gatewayMac` | string (MAC) | Kunci pencarian: gateway nyari node dengan `gatewayMac` = MAC-nya. **Wajib ada**: gateway cuma bisa dibuat lewat klasifikasi | Website (klasifikasi) |
 | `createdAt` | number | Placeholder supaya gateway kosong nggak dipangkas Firebase | Website |
 | `gatewayStatus/lastSeen` | number (server timestamp) | Diperbarui tiap `GATEWAY_HEARTBEAT_MS` | Gateway |
 | `gatewayStatus/lastRestartReason` | string | Teks dari `esp_reset_reason()` | Gateway |
