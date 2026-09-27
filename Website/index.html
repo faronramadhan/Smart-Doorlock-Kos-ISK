@@ -41,28 +41,7 @@
         </div>
     </div>
 
-    <!-- ===== VERIFY EMAIL VIEW (muncul setelah daftar, sebelum email diverifikasi) ===== -->
-    <div class="auth-view" id="verifyView" style="display:none;">
-        <div class="auth-card">
-            <div class="auth-brand">
-                <span class="brand-mark">
-                    <img src="Logo ISK.jpg" alt="Logo ISK">
-                </span>
-                <span class="brand-name">ISK House</span>
-            </div>
-            <h3 style="text-align:center; margin-bottom:10px;">Verifikasi Email Anda</h3>
-            <p style="text-align:center; color:var(--text-muted); font-size:13.5px; margin-bottom:20px;">
-                Kami sudah mengirim link verifikasi ke <strong id="verifyEmailLabel"></strong>.
-                Buka email tersebut dan klik link-nya, lalu tekan tombol "Saya Sudah Verifikasi" di bawah ini.
-            </p>
-            <p class="auth-error" id="verifyError"></p>
-            <button type="button" class="btn-primary btn-full" id="verifyCheckBtn">Saya Sudah Verifikasi</button>
-            <button type="button" class="btn-secondary btn-full" id="verifyResendBtn" style="margin-top:10px;">Kirim Ulang Email</button>
-            <button type="button" class="btn-ghost btn-full" id="verifyLogoutBtn" style="margin-top:10px;">Keluar</button>
-        </div>
-    </div>
-
-    <!-- ===== PENDING VIEW (muncul setelah email diverifikasi, menunggu/ditolak persetujuan admin) ===== -->
+    <!-- ===== PENDING VIEW (muncul setelah daftar, menunggu/ditolak persetujuan admin) ===== -->
     <div class="auth-view" id="pendingView" style="display:none;">
         <div class="auth-card">
             <div class="auth-brand">
@@ -119,7 +98,7 @@
             <!-- Tab Gateway (satu lantai bisa punya lebih dari 1 gateway, jangkauan ESP-NOW terbatas ~5 meter) -->
             <div class="toolbar-row gateway-tabs-row">
                 <div class="gateway-tabs" id="gatewayTabs"></div>
-                <button class="btn-icon-add" id="addGatewayBtn" title="Tambah Gateway">+ Gateway</button>
+                <button class="btn-icon-add" id="renameGatewayBtn" title="Ubah Nama Gateway Ini">Ubah Nama</button>
                 <button class="btn-icon-add danger" id="deleteGatewayBtn" title="Hapus Gateway Ini">Hapus</button>
             </div>
 
@@ -131,6 +110,14 @@
                         <span class="block-count" id="pendingCount">0</span>
                     </div>
                     <div id="pendingUsersList"></div>
+                </section>
+
+                <section class="block" id="usersBlock" style="display:none;">
+                    <div class="block-head">
+                        <h2>Pengguna Terdaftar</h2>
+                        <span class="block-count" id="usersCount">0</span>
+                    </div>
+                    <div id="usersList"></div>
                 </section>
 
                 <section class="block" id="gwPairingBlock" style="display:none;">
@@ -245,11 +232,11 @@
         </div>
     </div>
 
-    <!-- ===== MODAL: Tambah Gateway ===== -->
+    <!-- ===== MODAL: Ubah Nama Gateway (gateway baru hanya lewat Klasifikasikan Gateway) ===== -->
     <div class="modal-overlay" id="gwModalOverlay">
         <div class="modal">
-            <h3>Tambah Gateway</h3>
-            <p class="field-hint" style="margin-top:-6px;">Satu lantai bisa punya lebih dari 1 gateway kalau jangkauannya (~5 meter) tidak cukup menjangkau semua kamar.</p>
+            <h3>Ubah Nama Gateway</h3>
+            <p class="field-hint" style="margin-top:-6px;">MAC Gateway: <strong class="mono" id="gwMacLabel"></strong></p>
             <label class="field">
                 <span>Nama Gateway</span>
                 <input type="text" id="gwNameInput" placeholder="Gateway 3">
@@ -314,42 +301,22 @@
             <h3>Klasifikasikan Doorlock</h3>
             <p class="field-hint" style="margin-top:-6px;">MAC Doorlock: <strong class="mono" id="classifyMacLabel"></strong></p>
 
+            <p class="field-hint" id="classifyGwHint"></p>
+
             <label class="field">
                 <span>Cabang (Lokasi Kos)</span>
                 <select id="classifyLocSelect"></select>
             </label>
-            <div id="classifyNewLocFields">
-                <label class="field">
-                    <span>Nama Kos Baru</span>
-                    <input type="text" id="classifyLocNameInput" placeholder="ISK House — Cabang ...">
-                </label>
-                <label class="field">
-                    <span>Alamat Lengkap</span>
-                    <input type="text" id="classifyLocAddressInput" placeholder="Jl. ..., Kecamatan, Kota">
-                </label>
-            </div>
 
             <label class="field">
                 <span>Lantai</span>
                 <select id="classifyFloorSelect"></select>
             </label>
-            <div id="classifyNewFloorFields">
-                <label class="field">
-                    <span>Nama Lantai Baru</span>
-                    <input type="text" id="classifyFloorNameInput" placeholder="Lantai 3">
-                </label>
-            </div>
 
             <label class="field">
                 <span>Gateway</span>
                 <select id="classifyGwSelect"></select>
             </label>
-            <div id="classifyNewGwFields">
-                <label class="field">
-                    <span>Nama Gateway Baru</span>
-                    <input type="text" id="classifyGwNameInput" placeholder="Gateway 3">
-                </label>
-            </div>
 
             <label class="field">
                 <span>Nomor Kamar</span>

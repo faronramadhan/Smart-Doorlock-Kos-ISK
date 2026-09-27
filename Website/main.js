@@ -36,6 +36,7 @@ let currentUserRole = '';
 let currentUserLabel = '';
 let userRecordRef = null;      // listener realtime ke users/{uid} milik user yang sedang login
 let pendingUsersRef = null;    // listener realtime ke daftar pendaftar yang menunggu persetujuan (khusus admin)
+let registeredUsersRef = null; // listener realtime ke semua user untuk panel Pengguna Terdaftar (khusus admin)
 let pendingDevicesRef = null;  // listener realtime ke daftar doorlock yang sudah dipairing tapi belum diklasifikasikan (khusus admin)
 let pendingGatewaysRef = null; // listener realtime ke daftar gateway yang sudah terhubung tapi belum diklasifikasikan (khusus admin)
 let autoLockTimers = {}; // menyimpan setTimeout aktif per kamar
@@ -56,7 +57,6 @@ function nextUserLabel() {
 
 /* ===== ELEMEN: AUTH ===== */
 const authView = document.getElementById('authView');
-const verifyView = document.getElementById('verifyView');
 const pendingView = document.getElementById('pendingView');
 const appView = document.getElementById('appView');
 const authForm = document.getElementById('authForm');
@@ -67,12 +67,6 @@ const authSubmit = document.getElementById('authSubmit');
 const authTabs = document.querySelectorAll('.auth-tab');
 const userEmailEl = document.getElementById('userEmail');
 const logoutBtn = document.getElementById('logoutBtn');
-
-const verifyEmailLabel = document.getElementById('verifyEmailLabel');
-const verifyError = document.getElementById('verifyError');
-const verifyCheckBtn = document.getElementById('verifyCheckBtn');
-const verifyResendBtn = document.getElementById('verifyResendBtn');
-const verifyLogoutBtn = document.getElementById('verifyLogoutBtn');
 
 const pendingTitle = document.getElementById('pendingTitle');
 const pendingMessage = document.getElementById('pendingMessage');
@@ -100,54 +94,15 @@ authForm.addEventListener('submit', (e) => {
         auth.signInWithEmailAndPassword(email, password)
             .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
     } else {
+        // Tanpa verifikasi email: begitu akun dibuat, onAuthStateChanged -> handleUserRecord() membuat
+        // data users/{uid} berstatus "pending" dan menampilkan halaman menunggu persetujuan admin.
         auth.createUserWithEmailAndPassword(email, password)
-            .then(cred => {
-                return nextUserLabel().then(label => {
-                    db.ref(`users/${cred.user.uid}`).set({
-                        email: email,
-                        label: label,
-                        role: 'user',
-                        status: 'pending',
-                        createdAt: Date.now()
-                    });
-                    return cred.user.sendEmailVerification();
-                });
-            })
             .catch(err => { authError.textContent = terjemahkanErrorFirebase(err.code); });
     }
 });
 
 logoutBtn.addEventListener('click', () => auth.signOut());
 pendingLogoutBtn.addEventListener('click', () => auth.signOut());
-
-/* ===== VERIFIKASI EMAIL ===== */
-verifyCheckBtn.addEventListener('click', () => {
-    verifyError.textContent = '';
-    const user = auth.currentUser;
-    if (!user) return;
-
-    user.reload().then(() => {
-        if (user.emailVerified) {
-            db.ref(`users/${user.uid}`).once('value').then(snap => handleUserRecord(user, snap.val()));
-        } else {
-            verifyError.textContent = 'Email belum diverifikasi. Cek inbox/folder spam Anda.';
-        }
-    });
-});
-
-verifyResendBtn.addEventListener('click', () => {
-    verifyError.textContent = '';
-    const user = auth.currentUser;
-    if (!user) return;
-
-    verifyResendBtn.disabled = true;
-    user.sendEmailVerification()
-        .then(() => { verifyError.textContent = 'Email verifikasi terkirim ulang.'; })
-        .catch(err => { verifyError.textContent = terjemahkanErrorFirebase(err.code); })
-        .finally(() => { verifyResendBtn.disabled = false; });
-});
-
-verifyLogoutBtn.addEventListener('click', () => auth.signOut());
 
 function terjemahkanErrorFirebase(code) {
     const map = {
@@ -168,42 +123,35 @@ function showAppView(user, record) {
     currentUserLabel = record.label || (currentUserRole === 'admin' ? 'Admin' : user.email);
     userEmailEl.textContent = user.email;
     authView.style.display = 'none';
-    verifyView.style.display = 'none';
     pendingView.style.display = 'none';
     appView.classList.add('visible');
     initAppData();
     renderApprovalPanel();
+    renderUsersPanel();
     renderPairingPanel();
     renderGatewayPairingPanel();
 }
 
-function showVerifyView(user) {
-    currentUserEmail = '';
-    currentUserRole = '';
-    authView.style.display = 'none';
-    appView.classList.remove('visible');
-    pendingView.style.display = 'none';
-    verifyView.style.display = 'flex';
-    verifyEmailLabel.textContent = user.email;
-}
-
-/* state: 'pending' (menunggu persetujuan) atau 'rejected' (ditolak admin) */
+/* state: 'pending' (menunggu persetujuan), 'rejected' (ditolak admin), atau 'removed' (dikeluarkan admin) */
 function showPendingView(state) {
     currentUserEmail = '';
     currentUserRole = '';
     authView.style.display = 'none';
-    verifyView.style.display = 'none';
     appView.classList.remove('visible');
     detachApprovalPanel();
+    detachUsersPanel();
     detachPairingPanel();
     detachGatewayPairingPanel();
 
-    if (state === 'rejected') {
+    if (state === 'removed') {
+        pendingTitle.textContent = 'Akun Dikeluarkan';
+        pendingMessage.textContent = 'Akun Anda telah dikeluarkan dari ISK House oleh admin, sehingga tidak bisa lagi mengakses dashboard. Hubungi admin ISK House jika ini keliru.';
+    } else if (state === 'rejected') {
         pendingTitle.textContent = 'Pendaftaran Ditolak';
         pendingMessage.textContent = 'Maaf, pendaftaran akun Anda ditolak oleh admin. Hubungi admin ISK House jika ini keliru.';
     } else {
         pendingTitle.textContent = 'Menunggu Persetujuan Admin';
-        pendingMessage.textContent = 'Akun Anda sudah terverifikasi dan sedang menunggu persetujuan admin ISK House sebelum bisa mengakses dashboard. Halaman ini akan otomatis terbuka begitu disetujui.';
+        pendingMessage.textContent = 'Pendaftaran berhasil. Akun Anda sedang menunggu persetujuan admin ISK House sebelum bisa mengakses dashboard. Halaman ini akan otomatis terbuka begitu disetujui.';
     }
     pendingView.style.display = 'flex';
 }
@@ -214,20 +162,17 @@ function handleUserRecord(user, record) {
         showAppView(user, record);
         return;
     }
-    if (!user.emailVerified) {
-        showVerifyView(user);
-        return;
-    }
     if (record && record.status === 'approved') {
         showAppView(user, record);
         return;
     }
-    if (record && record.status === 'rejected') {
-        showPendingView('rejected');
+    if (record && (record.status === 'rejected' || record.status === 'removed')) {
+        showPendingView(record.status);
         return;
     }
     if (!record) {
-        // Akun lama (dibuat sebelum fitur ini ada) atau data belum sempat dibuat saat daftar
+        // Akun baru daftar (atau akun lama yang belum punya data): buat data berstatus "pending" di sini saja,
+        // supaya label dari meta/userCounter tidak terambil dua kali
         nextUserLabel().then(label => {
             db.ref(`users/${user.uid}`).set({ email: user.email, label: label, role: 'user', status: 'pending', createdAt: Date.now() });
         });
@@ -255,11 +200,11 @@ auth.onAuthStateChanged(user => {
     } else {
         detachUserRecordListener();
         detachApprovalPanel();
+        detachUsersPanel();
         detachPairingPanel();
         detachGatewayPairingPanel();
         currentUserEmail = '';
         currentUserRole = '';
-        verifyView.style.display = 'none';
         pendingView.style.display = 'none';
         appView.classList.remove('visible');
         authView.style.display = 'flex';
@@ -326,6 +271,96 @@ function detachApprovalPanel() {
     if (approvalBlock) approvalBlock.style.display = 'none';
 }
 
+/* ===== PANEL PENGGUNA TERDAFTAR (khusus admin) ===== */
+/* Semua user selain yang masih "pending" (itu ada di panel Persetujuan Pendaftar). "Keluarkan" tidak menghapus
+   akun Firebase Auth (butuh Admin SDK di server), tapi mengubah status jadi "removed" sehingga Rules menolak
+   semua akses data & user langsung terlempar ke halaman "Akun Dikeluarkan". */
+const usersBlock = document.getElementById('usersBlock');
+const usersList = document.getElementById('usersList');
+const usersCountEl = document.getElementById('usersCount');
+
+const USER_STATUS_LABEL = {
+    approved: ['user-active', 'Aktif'],
+    removed: ['user-out', 'Dikeluarkan'],
+    rejected: ['user-out', 'Ditolak']
+};
+
+function formatDate(ms) {
+    return ms ? new Date(ms).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) : '-';
+}
+
+function renderUsersPanel() {
+    if (currentUserRole !== 'admin') {
+        detachUsersPanel();
+        return;
+    }
+    usersBlock.style.display = 'block';
+    if (registeredUsersRef) return; // listener sudah aktif
+
+    registeredUsersRef = db.ref('users');
+    registeredUsersRef.on('value', (snapshot) => {
+        const entries = [];
+        snapshot.forEach(child => { entries.push({ uid: child.key, ...child.val() }); return false; });
+
+        // Admin dulu, lalu user aktif, lalu yang dikeluarkan/ditolak; masing-masing urut tanggal daftar
+        const rank = u => u.role === 'admin' ? 0 : u.status === 'approved' ? 1 : 2;
+        const users = entries
+            .filter(u => u.role === 'admin' || u.status !== 'pending')
+            .sort((a, b) => rank(a) - rank(b) || (a.createdAt || 0) - (b.createdAt || 0));
+
+        usersCountEl.textContent = users.filter(u => u.role === 'admin' || u.status === 'approved').length + ' aktif';
+
+        if (users.length === 0) {
+            usersList.innerHTML = `<p class="pending-empty">Belum ada pengguna terdaftar.</p>`;
+            return;
+        }
+
+        usersList.innerHTML = users.map(u => {
+            const isAdmin = u.role === 'admin';
+            const [badgeClass, badgeText] = isAdmin ? ['user-admin', 'Admin'] : (USER_STATUS_LABEL[u.status] || ['user-out', u.status || '-']);
+            const removedInfo = u.status === 'removed' && u.removedAt ? ` · Dikeluarkan ${formatDate(u.removedAt)}${u.removedBy ? ` oleh ${u.removedBy}` : ''}` : '';
+
+            let action = '';
+            if (!isAdmin && u.status === 'approved') {
+                action = `<button class="icon-btn danger" data-action="remove-user" data-uid="${u.uid}">Keluarkan</button>`;
+            } else if (!isAdmin) {
+                action = `<button class="icon-btn" data-action="restore-user" data-uid="${u.uid}">Izinkan Lagi</button>`;
+            }
+
+            return `
+                <div class="pending-user-item">
+                    <div class="pu-info">
+                        <div class="pu-email">${u.label ? `${u.label} — ${u.email}` : u.email} <span class="badge ${badgeClass}">${badgeText}</span></div>
+                        <div class="pu-date">Daftar ${formatDate(u.createdAt)}${removedInfo}</div>
+                    </div>
+                    <div class="pu-actions">${action}</div>
+                </div>
+            `;
+        }).join('');
+
+        usersList.querySelectorAll('[data-action]').forEach(btn => {
+            const user = users.find(u => u.uid === btn.dataset.uid);
+            btn.addEventListener('click', () => {
+                const name = user.label ? `${user.label} (${user.email})` : user.email;
+                if (btn.dataset.action === 'remove-user') {
+                    if (!confirm(`Keluarkan ${name}? User ini langsung kehilangan akses ke dashboard.`)) return;
+                    db.ref(`users/${user.uid}`).update({ status: 'removed', removedAt: Date.now(), removedBy: currentUserLabel || 'Admin' });
+                } else {
+                    db.ref(`users/${user.uid}`).update({ status: 'approved', removedAt: null, removedBy: null });
+                }
+            });
+        });
+    }, (err) => {
+        console.error('Gagal membaca daftar pengguna (users). Cek Realtime Database Rules.', err);
+        usersList.innerHTML = `<p class="pending-empty">Gagal memuat daftar pengguna (izin database ditolak). Cek Rules di Firebase Console.</p>`;
+    });
+}
+
+function detachUsersPanel() {
+    if (registeredUsersRef) { registeredUsersRef.off(); registeredUsersRef = null; }
+    if (usersBlock) usersBlock.style.display = 'none';
+}
+
 /* ===== PANEL DOORLOCK MENUNGGU KLASIFIKASI (khusus admin) ===== */
 /* Diisi Gateway lewat node pendingDevices/{macDoorlock} begitu pairing HMAC berhasil (lihat HMAC.md) */
 const pairingBlock = document.getElementById('pairingBlock');
@@ -362,14 +397,14 @@ function renderPairingPanel() {
                         <div class="pu-date">Gateway ${d.gatewayMac || '-'} · Dipairing ${date}</div>
                     </div>
                     <div class="pu-actions">
-                        <button class="icon-btn" data-mac="${d.mac}">Klasifikasikan</button>
+                        <button class="icon-btn" data-mac="${d.mac}" data-gwmac="${d.gatewayMac || ''}">Klasifikasikan</button>
                     </div>
                 </div>
             `;
         }).join('');
 
         pairingDevicesList.querySelectorAll('[data-mac]').forEach(btn => {
-            btn.addEventListener('click', () => openClassifyModal(btn.dataset.mac));
+            btn.addEventListener('click', () => openClassifyModal(btn.dataset.mac, btn.dataset.gwmac));
         });
     }, (err) => {
         console.error('Gagal membaca daftar doorlock pending (pendingDevices). Cek Realtime Database Rules.', err);
@@ -448,7 +483,7 @@ const floorTabs = document.getElementById('floorTabs');
 const addFloorBtn = document.getElementById('addFloorBtn');
 const deleteFloorBtn = document.getElementById('deleteFloorBtn');
 const gatewayTabs = document.getElementById('gatewayTabs');
-const addGatewayBtn = document.getElementById('addGatewayBtn');
+const renameGatewayBtn = document.getElementById('renameGatewayBtn');
 const deleteGatewayBtn = document.getElementById('deleteGatewayBtn');
 const gatewaySummary = document.getElementById('gatewaySummary');
 const roomList = document.getElementById('roomList');
@@ -474,6 +509,7 @@ const floorModalError = document.getElementById('floorModalError');
 
 const gwModalOverlay = document.getElementById('gwModalOverlay');
 const gwNameInput = document.getElementById('gwNameInput');
+const gwMacLabel = document.getElementById('gwMacLabel');
 const gwModalError = document.getElementById('gwModalError');
 
 const roomModalError = document.getElementById('roomModalError');
@@ -1005,9 +1041,15 @@ deleteFloorBtn.addEventListener('click', () => {
 /* ===== RENDER: Tab Gateway ===== */
 /* Satu lantai bisa punya > 1 gateway karena jangkauan ESP-NOW gateway terbatas (~5 meter) */
 function renderGatewayTabs() {
+    const hasGateway = !!(currentLoc && currentFloor && currentGw);
+    renameGatewayBtn.style.display = hasGateway ? '' : 'none';
+    deleteGatewayBtn.style.display = hasGateway ? '' : 'none';
     if (!currentLoc || !currentFloor) { gatewayTabs.innerHTML = ''; return; }
     const gateways = getGateways(locationsData[currentLoc][currentFloor]);
-    gatewayTabs.innerHTML = Object.keys(gateways).map(id => `
+    const ids = Object.keys(gateways);
+    gatewayTabs.innerHTML = ids.length === 0
+        ? `<span class="gateway-empty">Belum ada gateway di lantai ini. Nyalakan gateway, lalu klasifikasikan dari panel "Gateway Menunggu Klasifikasi".</span>`
+        : ids.map(id => `
         <button class="gateway-tab ${id === currentGw ? 'active' : ''}" data-gw="${id}">${id}</button>
     `).join('');
 
@@ -1020,12 +1062,16 @@ function renderGatewayTabs() {
     });
 }
 
-/* ===== MODAL: Tambah Gateway ===== */
-addGatewayBtn.addEventListener('click', () => {
-    if (!currentFloor) { alert('Tambahkan lantai dulu.'); return; }
-    gwNameInput.value = '';
+/* ===== MODAL: Ubah Nama Gateway ===== */
+/* Gateway baru tidak bisa dibuat manual - hanya lewat "Klasifikasikan Gateway" (panel Gateway Menunggu Klasifikasi),
+   supaya setiap node gateway pasti punya gatewayMac dan tersambung ke perangkat sungguhan. */
+renameGatewayBtn.addEventListener('click', () => {
+    if (!currentLoc || !currentFloor || !currentGw) return;
+    gwNameInput.value = currentGw;
+    gwMacLabel.textContent = locationsData[currentLoc][currentFloor][currentGw]?.gatewayMac || '-';
     gwModalError.textContent = '';
     gwModalOverlay.classList.add('open');
+    gwNameInput.select();
 });
 document.getElementById('gwModalCancel').addEventListener('click', () => gwModalOverlay.classList.remove('open'));
 gwModalOverlay.addEventListener('click', (e) => { if (e.target === gwModalOverlay) gwModalOverlay.classList.remove('open'); });
@@ -1035,19 +1081,31 @@ function generateGatewayKey(locId, floorId, name) {
     return nextAvailableKey(locationsData[locId]?.[floorId] || {}, name, [], 'Gateway');
 }
 
+/* Key gateway = nama gateway, jadi ganti nama = pindahkan seluruh isi node ke key baru lalu hapus key lama dalam
+   satu update atomik. Perangkat gateway ikut pindah sendiri karena mencari node-nya lewat gatewayMac, bukan nama. */
 document.getElementById('gwModalSave').addEventListener('click', () => {
     gwModalError.textContent = '';
-    const name = gwNameInput.value.trim();
-    if (!name || !currentLoc || !currentFloor) { gwModalError.textContent = 'Nama gateway wajib diisi.'; return; }
+    const name = sanitizeKeyPart(gwNameInput.value);
+    const oldKey = currentGw;
+    if (!name || !currentLoc || !currentFloor || !oldKey) { gwModalError.textContent = 'Nama gateway wajib diisi.'; return; }
+    if (name === oldKey) { gwModalOverlay.classList.remove('open'); return; }
 
-    const key = generateGatewayKey(currentLoc, currentFloor, name);
-    // createdAt = placeholder yang sama seperti di lantai, supaya gateway kosong (belum ada kamar) tidak
-    // dipangkas Firebase - dibersihkan otomatis lewat stripLegacyCreatedAt begitu sudah ada kamar sungguhan.
-    db.ref(`locations/${currentLoc}/${currentFloor}/${key}`).set({ createdAt: Date.now() }).then(() => {
-        currentGw = key;
+    const floor = locationsData[currentLoc][currentFloor];
+    if (floor[name] !== undefined || FLOOR_META_FIELDS.includes(name)) { gwModalError.textContent = `Nama "${name}" sudah dipakai di lantai ini.`; return; }
+
+    // Timer auto-kunci menyimpan path lama; dihentikan dulu supaya tidak menulis ulang node lama setelah dipindah
+    const timerPrefix = `${currentLoc}_${currentFloor}_${oldKey}_`;
+    Object.keys(autoLockTimers).forEach(k => {
+        if (k.startsWith(timerPrefix)) { clearTimeout(autoLockTimers[k]); delete autoLockTimers[k]; }
+    });
+
+    const floorPath = `locations/${currentLoc}/${currentFloor}`;
+    db.ref().update({ [`${floorPath}/${name}`]: floor[oldKey], [`${floorPath}/${oldKey}`]: null }).then(() => {
+        renameHistoryGateway(currentLoc, currentFloor, oldKey, name);
+        currentGw = name;
         gwModalOverlay.classList.remove('open');
     }).catch(err => {
-        console.error('Gagal menyimpan gateway baru. Cek Realtime Database Rules.', err);
+        console.error('Gagal mengubah nama gateway. Cek Realtime Database Rules.', err);
         gwModalError.textContent = err.code === 'PERMISSION_DENIED'
             ? 'Gagal menyimpan: akun Anda tidak punya izin menulis data (bukan admin/belum disetujui).'
             : 'Gagal menyimpan, coba lagi.';
@@ -1056,7 +1114,7 @@ document.getElementById('gwModalSave').addEventListener('click', () => {
 
 deleteGatewayBtn.addEventListener('click', () => {
     if (!currentLoc || !currentFloor || !currentGw) return;
-    if (!confirm(`Hapus ${currentGw} beserta semua kamarnya? Tindakan ini tidak bisa dibatalkan.`)) return;
+    if (!confirm(`Hapus ${currentGw} beserta semua kamarnya? Tindakan ini tidak bisa dibatalkan.\n\nSelama perangkat gateway masih menyala, gateway ini akan muncul lagi di "Gateway Menunggu Klasifikasi".`)) return;
     db.ref(`locations/${currentLoc}/${currentFloor}/${currentGw}`).remove();
     currentGw = null;
 });
@@ -1314,6 +1372,13 @@ function saveLocalHistory(entries) {
     }
 }
 
+/* Riwayat menyimpan nama gateway, jadi ikut diganti saat gateway diubah namanya (hanya di browser ini) */
+function renameHistoryGateway(loc, floor, oldGw, newGw) {
+    const entries = loadLocalHistory();
+    entries.forEach(h => { if (h.loc === loc && h.floor === floor && h.gw === oldGw) h.gw = newGw; });
+    saveLocalHistory(entries);
+}
+
 function logHistory(loc, floor, gw, roomNumber, action, by) {
     const entries = loadLocalHistory();
     entries.push({ loc, floor, gw, roomNumber, action, by, timestamp: Date.now() });
@@ -1552,81 +1617,70 @@ document.getElementById('classifyGwModalSave').addEventListener('click', () => {
 const classifyModalOverlay = document.getElementById('classifyModalOverlay');
 const classifyMacLabel = document.getElementById('classifyMacLabel');
 const classifyLocSelect = document.getElementById('classifyLocSelect');
-const classifyNewLocFields = document.getElementById('classifyNewLocFields');
-const classifyLocNameInput = document.getElementById('classifyLocNameInput');
-const classifyLocAddressInput = document.getElementById('classifyLocAddressInput');
 const classifyFloorSelect = document.getElementById('classifyFloorSelect');
-const classifyNewFloorFields = document.getElementById('classifyNewFloorFields');
-const classifyFloorNameInput = document.getElementById('classifyFloorNameInput');
 const classifyGwSelect = document.getElementById('classifyGwSelect');
-const classifyNewGwFields = document.getElementById('classifyNewGwFields');
-const classifyGwNameInput = document.getElementById('classifyGwNameInput');
+const classifyGwHint = document.getElementById('classifyGwHint');
 const classifyRoomNumberInput = document.getElementById('classifyRoomNumberInput');
 const classifyError = document.getElementById('classifyError');
 
 let classifyingMac = null;
 
-function openClassifyModal(mac) {
+/* Doorlock hanya bisa dipasang di gateway yang sudah diklasifikasikan (tidak bisa bikin cabang/lantai/gateway baru
+   dari sini). Pilihan cabang & lantai hanya yang punya gateway. */
+function floorsWithGateways(locId) {
+    return Object.keys(getFloors(locationsData[locId])).filter(f => Object.keys(getGateways(locationsData[locId][f])).length > 0);
+}
+
+function findGatewayByMac(mac) {
+    if (!mac) return null;
+    for (const [locId, loc] of Object.entries(locationsData)) {
+        for (const [floorId, floor] of Object.entries(getFloors(loc))) {
+            for (const [gwId, gw] of Object.entries(getGateways(floor))) {
+                if ((gw?.gatewayMac || '').toUpperCase() === mac.toUpperCase()) return { locId, floorId, gwId };
+            }
+        }
+    }
+    return null;
+}
+
+function openClassifyModal(mac, pairedGatewayMac) {
     classifyingMac = mac;
     classifyMacLabel.textContent = mac;
     classifyError.textContent = '';
 
-    classifyLocSelect.innerHTML = Object.entries(locationsData)
-        .map(([id, loc]) => `<option value="${id}">${loc.name}</option>`).join('')
-        + `<option value="${NEW_OPTION_VALUE}">+ Cabang Baru</option>`;
-    classifyLocSelect.value = (currentLoc && locationsData[currentLoc]) ? currentLoc : NEW_OPTION_VALUE;
+    const locIds = Object.keys(locationsData).filter(id => floorsWithGateways(id).length > 0);
+    if (locIds.length === 0) {
+        alert('Belum ada gateway yang diklasifikasikan. Klasifikasikan gateway dulu dari panel "Gateway Menunggu Klasifikasi".');
+        classifyingMac = null;
+        return;
+    }
 
-    updateClassifyLocFields();
+    // Default: gateway yang mem-pairing doorlock ini (dari pendingDevices/{mac}/gatewayMac)
+    const paired = findGatewayByMac(pairedGatewayMac);
+    classifyGwHint.textContent = paired
+        ? `Dipairing lewat gateway ${paired.gwId} (${pairedGatewayMac}).`
+        : (pairedGatewayMac ? `Dipairing lewat gateway ${pairedGatewayMac} yang belum diklasifikasikan.` : '');
+
+    classifyLocSelect.innerHTML = locIds.map(id => `<option value="${id}">${locationsData[id].name}</option>`).join('');
+    classifyLocSelect.value = paired ? paired.locId : (locIds.includes(currentLoc) ? currentLoc : locIds[0]);
+    updateClassifyFloorOptions(paired);
     classifyModalOverlay.classList.add('open');
 }
 
-function updateClassifyLocFields() {
-    const isNewLoc = classifyLocSelect.value === NEW_OPTION_VALUE;
-    classifyNewLocFields.style.display = isNewLoc ? 'block' : 'none';
-    classifyLocNameInput.value = '';
-    classifyLocAddressInput.value = '';
-    updateClassifyFloorOptions();
-}
-
-function updateClassifyFloorOptions() {
+function updateClassifyFloorOptions(preselect) {
     const locId = classifyLocSelect.value;
-    const isNewLoc = locId === NEW_OPTION_VALUE;
-    const floors = isNewLoc ? {} : getFloors(locationsData[locId]);
-    const floorIds = Object.keys(floors);
-
-    classifyFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${id}</option>`).join('')
-        + `<option value="${NEW_OPTION_VALUE}">+ Lantai Baru</option>`;
-    classifyFloorSelect.value = (!isNewLoc && currentFloor && floors[currentFloor]) ? currentFloor : (floorIds[0] || NEW_OPTION_VALUE);
-
-    updateClassifyFloorFields();
+    const floorIds = floorsWithGateways(locId);
+    classifyFloorSelect.innerHTML = floorIds.map(id => `<option value="${id}">${id}</option>`).join('');
+    classifyFloorSelect.value = preselect?.floorId && floorIds.includes(preselect.floorId) ? preselect.floorId
+        : (floorIds.includes(currentFloor) ? currentFloor : floorIds[0]);
+    updateClassifyGwOptions(preselect);
 }
 
-function updateClassifyFloorFields() {
-    const isNewFloor = classifyFloorSelect.value === NEW_OPTION_VALUE;
-    classifyNewFloorFields.style.display = isNewFloor ? 'block' : 'none';
-    classifyFloorNameInput.value = '';
-    updateClassifyGwOptions();
-}
-
-function updateClassifyGwOptions() {
-    const locId = classifyLocSelect.value;
-    const floorId = classifyFloorSelect.value;
-    const isNewLoc = locId === NEW_OPTION_VALUE;
-    const isNewFloor = floorId === NEW_OPTION_VALUE;
-    const gateways = (isNewLoc || isNewFloor) ? {} : getGateways(locationsData[locId]?.[floorId]);
-    const gwIds = Object.keys(gateways);
-
-    classifyGwSelect.innerHTML = gwIds.map(id => `<option value="${id}">${id}</option>`).join('')
-        + `<option value="${NEW_OPTION_VALUE}">+ Gateway Baru</option>`;
-    classifyGwSelect.value = (!isNewLoc && !isNewFloor && currentGw && gateways[currentGw]) ? currentGw : (gwIds[0] || NEW_OPTION_VALUE);
-
-    updateClassifyGwFields();
-}
-
-function updateClassifyGwFields() {
-    const isNewGw = classifyGwSelect.value === NEW_OPTION_VALUE;
-    classifyNewGwFields.style.display = isNewGw ? 'block' : 'none';
-    classifyGwNameInput.value = '';
+function updateClassifyGwOptions(preselect) {
+    const gwIds = Object.keys(getGateways(locationsData[classifyLocSelect.value]?.[classifyFloorSelect.value]));
+    classifyGwSelect.innerHTML = gwIds.map(id => `<option value="${id}">${id}</option>`).join('');
+    classifyGwSelect.value = preselect?.gwId && gwIds.includes(preselect.gwId) ? preselect.gwId
+        : (gwIds.includes(currentGw) ? currentGw : gwIds[0]);
     updateClassifyRoomOptions();
 }
 
@@ -1634,20 +1688,10 @@ function updateClassifyRoomOptions() {
     const locId = classifyLocSelect.value;
     const floorId = classifyFloorSelect.value;
     const gwId = classifyGwSelect.value;
-    const isNewLoc = locId === NEW_OPTION_VALUE;
-    const isNewFloor = floorId === NEW_OPTION_VALUE;
-    const isNewGw = gwId === NEW_OPTION_VALUE;
+    const usedNumbers = Object.keys(getRooms(locationsData[locId]?.[floorId]?.[gwId])).map(roomNumberFromKey);
 
-    let usedNumbers = [];
-    if (!isNewLoc && !isNewFloor && !isNewGw) {
-        const rooms = getRooms(locationsData[locId]?.[floorId]?.[gwId]);
-        usedNumbers = Object.keys(rooms).map(roomNumberFromKey);
-    }
-
-    // Penomoran ikut angka lantai (mis. Lantai 2 -> 201-220) - kalau lantai baru, pakai nama yang sedang diketik
-    const floorForNumbering = isNewFloor ? classifyFloorNameInput.value.trim() : floorId;
-    const { start, end } = getRoomNumberRange(floorForNumbering);
-
+    // Penomoran ikut angka lantai (mis. Lantai 2 -> 201-220)
+    const { start, end } = getRoomNumberRange(floorId);
     const available = [];
     for (let i = start; i <= end; i++) {
         if (!usedNumbers.includes(i)) available.push(i);
@@ -1655,10 +1699,9 @@ function updateClassifyRoomOptions() {
     classifyRoomNumberInput.innerHTML = available.map(n => `<option value="${n}">Kamar ${n}</option>`).join('');
 }
 
-classifyLocSelect.addEventListener('change', updateClassifyLocFields);
-classifyFloorSelect.addEventListener('change', updateClassifyFloorFields);
-classifyFloorNameInput.addEventListener('input', updateClassifyRoomOptions);
-classifyGwSelect.addEventListener('change', updateClassifyGwFields);
+classifyLocSelect.addEventListener('change', () => updateClassifyFloorOptions());
+classifyFloorSelect.addEventListener('change', () => updateClassifyGwOptions());
+classifyGwSelect.addEventListener('change', updateClassifyRoomOptions);
 
 function closeClassifyModal() {
     classifyModalOverlay.classList.remove('open');
@@ -1671,56 +1714,22 @@ classifyModalOverlay.addEventListener('click', (e) => { if (e.target === classif
 document.getElementById('classifyModalSave').addEventListener('click', () => {
     classifyError.textContent = '';
 
-    const isNewLoc = classifyLocSelect.value === NEW_OPTION_VALUE;
-    const isNewFloor = classifyFloorSelect.value === NEW_OPTION_VALUE;
-    const isNewGw = classifyGwSelect.value === NEW_OPTION_VALUE;
+    const locId = classifyLocSelect.value;
+    const floorId = classifyFloorSelect.value;
+    const gwId = classifyGwSelect.value;
     const roomNumber = parseInt(classifyRoomNumberInput.value);
     const mac = classifyingMac;
 
+    if (!locId || !floorId || !gwId) { classifyError.textContent = 'Pilih gateway.'; return; }
     if (!roomNumber) { classifyError.textContent = 'Pilih nomor kamar.'; return; }
-    if (isNewLoc && !classifyLocNameInput.value.trim()) { classifyError.textContent = 'Nama kos baru wajib diisi.'; return; }
-    if (isNewFloor && !classifyFloorNameInput.value.trim()) { classifyError.textContent = 'Nama lantai baru wajib diisi.'; return; }
-    if (isNewGw && !classifyGwNameInput.value.trim()) { classifyError.textContent = 'Nama gateway baru wajib diisi.'; return; }
 
-    let locWrite;
-    if (isNewLoc) {
-        const name = classifyLocNameInput.value.trim();
-        const address = classifyLocAddressInput.value.trim();
-        const locId = generateLocationKey(name, address);
-        locWrite = db.ref(`locations/${locId}`).set({ name, address }).then(() => locId);
-    } else {
-        locWrite = Promise.resolve(classifyLocSelect.value);
-    }
-
-    locWrite.then(locId => {
-        let floorWrite;
-        if (isNewFloor) {
-            const name = classifyFloorNameInput.value.trim();
-            const floorId = generateFloorKey(locId, name);
-            floorWrite = db.ref(`locations/${locId}/${floorId}`).set({}).then(() => floorId);
-        } else {
-            floorWrite = Promise.resolve(classifyFloorSelect.value);
-        }
-        return floorWrite.then(floorId => ({ locId, floorId }));
-    }).then(({ locId, floorId }) => {
-        let gwWrite;
-        if (isNewGw) {
-            const name = classifyGwNameInput.value.trim();
-            const gwId = generateGatewayKey(locId, floorId, name);
-            gwWrite = db.ref(`locations/${locId}/${floorId}/${gwId}`).set({}).then(() => gwId);
-        } else {
-            gwWrite = Promise.resolve(classifyGwSelect.value);
-        }
-        return gwWrite.then(gwId => ({ locId, floorId, gwId }));
-    }).then(({ locId, floorId, gwId }) => {
-        const roomPath = `locations/${locId}/${floorId}/${gwId}/${roomKey(roomNumber)}`;
-        return db.ref(roomPath).set({ tenant: '', rfidAccess: true, status: 'locked', doorlockMac: mac }).then(() => {
-            logHistory(locId, floorId, gwId, roomNumber, 'classified', currentUserLabel || 'Admin');
-            currentLoc = locId;
-            currentFloor = floorId;
-            currentGw = gwId;
-            return db.ref(`pendingDevices/${mac}`).remove();
-        });
+    const roomPath = `locations/${locId}/${floorId}/${gwId}/${roomKey(roomNumber)}`;
+    db.ref(roomPath).set({ tenant: '', rfidAccess: true, status: 'locked', doorlockMac: mac }).then(() => {
+        logHistory(locId, floorId, gwId, roomNumber, 'classified', currentUserLabel || 'Admin');
+        currentLoc = locId;
+        currentFloor = floorId;
+        currentGw = gwId;
+        return db.ref(`pendingDevices/${mac}`).remove();
     }).then(() => {
         closeClassifyModal();
     }).catch(err => {
