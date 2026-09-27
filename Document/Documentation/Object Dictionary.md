@@ -155,6 +155,7 @@ Jenis pesan dibedakan dari **panjang + byte pertama**, jadi panjang tiap jenis n
 | `0x11` | `EVT_LOCKED` | Doorlock → Gateway | Pintu terkunci |
 | `0x12` | `EVT_UNLOCKED` | Doorlock → Gateway | Pintu terbuka |
 | `0x13` | `EVT_BATTERY_SHUTDOWN` | Doorlock → Gateway | Pamit mati karena baterai habis |
+| `0x14` | `EVT_RFID_REJECTED` | Doorlock → Gateway | Kartu RFID ditempel tapi ditolak karena `rfidAccess` = `false` |
 | `0xF0`–`0xF2` | `EVT_PAIRED`, `EVT_REJECTED`, `EVT_HEARTBEAT` | internal Gateway | Antrian dari callback ESP-NOW ke `loop()`, **tidak** dikirim lewat radio |
 
 Rentang kode: `0x0_` perintah, `0x1_` kejadian dari doorlock, `0xF_` internal. Kode baru ikut rentang ini.
