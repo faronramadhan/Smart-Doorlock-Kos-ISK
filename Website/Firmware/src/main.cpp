@@ -6,19 +6,12 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <Firebase_ESP_Client.h>
-#include <addons/TokenHelper.h>
 
 /* ===== KONFIGURASI ===== */
-#define WIFI_SSID        "ISI_SSID_WIFI"
-#define WIFI_PASSWORD    "ISI_PASSWORD_WIFI"
+// WIFI_SSID, WIFI_PASSWORD & DATABASE_SECRET ada di include/secrets.h (tidak ikut di-commit, lihat secrets.example.h)
+#include "secrets.h"
 
-#define API_KEY          "AIzaSyDQbNT5P1naNasch6GHjBXPrP5assqJ3Yo"
 #define DATABASE_URL     "https://isk-house-default-rtdb.asia-southeast1.firebasedatabase.app"
-
-// Akun Firebase Auth khusus gateway. Rules: locations boleh ditulis admin/approved,
-// pendingGateways & pendingDevices hanya admin -> akun ini perlu users/{uid}/role = "admin".
-#define GATEWAY_EMAIL    "ISI_EMAIL_AKUN_GATEWAY"
-#define GATEWAY_PASSWORD "ISI_PASSWORD_AKUN_GATEWAY"
 
 // Path node gateway di database. Isi untuk gateway yang dibuat manual dari dashboard (tanpa gatewayMac);
 // kosongkan ("") supaya gateway mencari sendiri lewat gatewayMac hasil klasifikasi admin.
@@ -81,7 +74,7 @@ typedef struct {
 /* ===== STATE ===== */
 FirebaseData fbdo;    // request biasa (get/set/update)
 FirebaseData stream;  // koneksi stream ke node gateway
-FirebaseAuth fbAuth;
+FirebaseAuth fbAuth;  // tidak diisi — gateway login pakai database secret, bukan email
 FirebaseConfig fbConfig;
 Preferences prefs;
 
@@ -126,6 +119,23 @@ bool parseMac(const String &text, uint8_t *out) {
   if (sscanf(text.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) return false;
   for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[i];
   return true;
+}
+
+// Library Firebase tidak meng-encode path, padahal key di database berisi spasi & koma
+// (mis. "ISK House Kemayoran - Gg H Abdullah No34, RT9RW9, Utan Panja") -> request rusak tanpa ini
+String dbPath(const String &path) {
+  String out;
+  for (size_t i = 0; i < path.length(); i++) {
+    char c = path[i];
+    if (isalnum((unsigned char)c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || c == ':') {
+      out += c;
+    } else {
+      char buf[4];
+      snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)c);
+      out += buf;
+    }
+  }
+  return out;
 }
 
 void printFirebaseError(const char *context) {
@@ -351,7 +361,7 @@ void registerPendingGateway() {
 // Baca ulang seluruh node gateway (kecil, tanpa history), bandingkan dengan data lama, kirim perintah bila berubah.
 // Kamar = semua child berbentuk object (gatewayMac/createdAt otomatis terlewati), sama seperti getRooms() di website.
 void refreshRooms() {
-  if (!Firebase.RTDB.get(&fbdo, gatewayPath)) { printFirebaseError("Baca node gateway"); return; }
+  if (!Firebase.RTDB.get(&fbdo, dbPath(gatewayPath))) { printFirebaseError("Baca node gateway"); return; }
 
   JsonDocument doc;
   if (fbdo.dataType() != "json" || deserializeJson(doc, fbdo.payload())) {
@@ -400,7 +410,7 @@ void refreshRooms() {
 }
 
 void startStream() {
-  if (Firebase.RTDB.beginStream(&stream, gatewayPath)) {
+  if (Firebase.RTDB.beginStream(&stream, dbPath(gatewayPath))) {
     streaming = true;
     Serial.printf("[STREAM] Memantau %s\n", gatewayPath.c_str());
   } else if (millis() - lastStreamErrorAt > 5000) {
@@ -441,6 +451,21 @@ void reportDoorlockPaired(const String &doorlockMac) {
   }
 }
 
+// Tulis status kamar ke Firebase. Status lokal di-update duluan supaya refreshRooms() tidak menganggapnya perubahan baru.
+bool setRoomStatus(Room *r, bool unlocked, const char *source) {
+  r->status = unlocked ? "unlocked" : "locked";
+  String roomPath = gatewayPath + "/" + r->key;
+
+  FirebaseJson update;
+  update.set("status", r->status);
+  if (unlocked) update.set("unlockedAt/.sv", "timestamp");
+  if (!Firebase.RTDB.updateNode(&fbdo, dbPath(roomPath), &update)) { printFirebaseError("Update status kamar"); return false; }
+  if (!unlocked) Firebase.RTDB.deleteNode(&fbdo, dbPath(roomPath + "/unlockedAt"));
+
+  Serial.printf("[GATEWAY] %s %s (%s).\n", r->key.c_str(), r->status.c_str(), source);
+  return true;
+}
+
 // Doorlock membuka/mengunci sendiri (mis. tap RFID) -> status di dashboard ikut update
 void reportDoorEvent(const String &doorlockMac, bool unlocked) {
   Room *r = findRoomByDoorlock(doorlockMac);
@@ -448,18 +473,7 @@ void reportDoorEvent(const String &doorlockMac, bool unlocked) {
     Serial.printf("[GATEWAY] Laporan dari %s diabaikan (tidak terpasang di kamar manapun pada gateway ini).\n", doorlockMac.c_str());
     return;
   }
-
-  // Update status lokal duluan supaya refreshRooms() tidak mengirim balik perintah yang sama ke doorlock
-  r->status = unlocked ? "unlocked" : "locked";
-  String roomPath = gatewayPath + "/" + r->key;
-
-  FirebaseJson update;
-  update.set("status", r->status);
-  if (unlocked) update.set("unlockedAt/.sv", "timestamp");
-  if (!Firebase.RTDB.updateNode(&fbdo, roomPath, &update)) { printFirebaseError("Update status kamar"); return; }
-  if (!unlocked) Firebase.RTDB.deleteNode(&fbdo, roomPath + "/unlockedAt");
-
-  Serial.printf("[GATEWAY] %s %s (dilaporkan doorlock).\n", r->key.c_str(), r->status.c_str());
+  setRoomStatus(r, unlocked, "dilaporkan doorlock");
 }
 
 void processEvents() {
@@ -482,6 +496,7 @@ void processEvents() {
 /* ===== PERINTAH SERIAL ===== */
 // Pairing                    -> aktifkan mode pairing ESP-NOW
 // rooms                      -> tampilkan daftar kamar yang tersinkron
+// unlock 101 / lock 101      -> ubah status Kamar 101 di Firebase + kirim perintah ke doorlock-nya
 // unlock AA:BB:CC:DD:EE:FF   -> simulasi laporan doorlock terbuka (tanpa doorlock fisik)
 // lock AA:BB:CC:DD:EE:FF     -> simulasi laporan doorlock terkunci
 // pair AA:BB:CC:DD:EE:FF     -> simulasi pairing doorlock berhasil
@@ -512,11 +527,15 @@ void handleSerialCommand() {
     forgetGatewayPath();
     lastDiscoveryAt = 0;
     Serial.println("Lokasi gateway direset.");
+  } else if ((command == "unlock" || command == "lock") && arg.length() && arg.indexOf(':') < 0) {
+    Room *r = findRoomByKey("Kamar " + arg);
+    if (!r) { Serial.printf("Kamar %s tidak ada di gateway ini (cek dengan \"rooms\").\n", arg.c_str()); return; }
+    if (setRoomStatus(r, command == "unlock", "diubah lewat Serial Monitor")) onRoomStatusChanged(*r);
   } else if (command == "pair" || command == "unlock" || command == "lock") {
     if (!parseMac(arg, mac)) { Serial.println("Format MAC: AA:BB:CC:DD:EE:FF"); return; }
     pushEvent(mac, command == "pair" ? EVT_PAIRED : command == "unlock" ? EVT_UNLOCKED : EVT_LOCKED);
   } else if (command.length()) {
-    Serial.println("Perintah: Pairing, rooms, reset, pair|unlock|lock <MAC>");
+    Serial.println("Perintah: Pairing, rooms, reset, unlock|lock <nomor kamar>, pair|unlock|lock <MAC>");
   }
 }
 
@@ -527,10 +546,16 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Menghubungkan WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.printf("Menghubungkan WiFi \"%s\"", WIFI_SSID);
+  // Coba ulang tiap 10 detik — ESP32-C3 kadang tidak tersambung pada percobaan pertama setelah reset
+  for (int attempt = 1; WiFi.status() != WL_CONNECTED; attempt++) {
     Serial.print(".");
     delay(500);
+    if (attempt % 20 == 0) {
+      Serial.printf("\nBelum tersambung (status %d), mencoba ulang", WiFi.status());
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
   }
   gatewayMac = WiFi.macAddress();
   // ESP-NOW memakai channel yang sama dengan router -> doorlock harus berada di channel ini juga
@@ -543,18 +568,13 @@ void setup() {
   prefs.begin("gateway", false);
   gatewayPath = useFixedPath ? String(GATEWAY_PATH) : prefs.getString("path", "");
 
-  fbConfig.api_key = API_KEY;
+  // Database secret (legacy token) = akses penuh ke database tanpa akun email, melewati Rules
   fbConfig.database_url = DATABASE_URL;
-  fbConfig.token_status_callback = tokenStatusCallback;
-  fbAuth.user.email = GATEWAY_EMAIL;
-  fbAuth.user.password = GATEWAY_PASSWORD;
+  fbConfig.signer.tokens.legacy_token = DATABASE_SECRET;
 
   Firebase.reconnectNetwork(true);
   Firebase.begin(&fbConfig, &fbAuth);
-
-  Serial.println("Menunggu login Firebase...");
-  while (!Firebase.ready()) delay(100);
-  Serial.println("Firebase siap. Ketik \"Pairing\" untuk mulai pairing doorlock.");
+  Serial.println("Ketik \"Pairing\" untuk mulai pairing doorlock, \"rooms\" untuk lihat kamar.");
 }
 
 void loop() {
