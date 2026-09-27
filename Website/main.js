@@ -17,11 +17,16 @@ const MAX_ROOMS = 20;
 const MAX_HISTORY_PER_ROOM = 1000; // riwayat disimpan maks 1000 terakhir per kamar
 const HISTORY_STORAGE_KEY = 'isk-history'; // riwayat hanya disimpan di localStorage browser, tidak di Firebase
 const AUTO_LOCK_SECONDS = 5;       // ganti angka ini untuk atur durasi pintu terbuka
+const GATEWAY_OFFLINE_MS = 75000;  // gateway melapor tiap 30 detik; lewat dari ini dianggap offline
+const BATTERY_LOW = 20;            // % -> indikator baterai merah (sama dengan BATTERY_LOW di firmware gateway)
+// Field status doorlock yang ditulis gateway - dipertahankan saat kamar diedit supaya tidak hilang
+const DEVICE_STATUS_FIELDS = ['battery', 'connection', 'connectionReason', 'connectionUpdatedAt'];
 
 // Firebase Auth butuh format email, jadi username tanpa "@" diubah jadi email sintetis dengan domain ini
 const AUTH_EMAIL_DOMAIN = 'isk-house.local';
 
 let locationsData = {};
+let serverTimeOffset = 0;      // selisih jam browser dengan jam server Firebase (untuk menilai gateway online/offline)
 let currentLoc = null;
 let currentFloor = null;
 let currentGw = null;
@@ -519,8 +524,9 @@ function getGateways(floor) {
 }
 
 /* Field metadata milik gateway (bukan nama kamar) — gatewayMac dari pairing, createdAt = placeholder yang sama
-   seperti di lantai, dipakai supaya gateway yang masih kosong (belum ada kamar) tidak dipangkas Firebase */
-const GATEWAY_META_FIELDS = ['gatewayMac', 'createdAt'];
+   seperti di lantai, dipakai supaya gateway yang masih kosong (belum ada kamar) tidak dipangkas Firebase,
+   gatewayStatus = laporan berkala dari firmware gateway (lastSeen, alasan restart/putus WiFi) */
+const GATEWAY_META_FIELDS = ['gatewayMac', 'createdAt', 'gatewayStatus'];
 
 /* Kamar = semua child gateway selain field metadata gatewayMac/createdAt. Disaring juga entri null -
    Firebase kadang merepresentasikan child bernomor sebagai array bercelah (null di slot kosong). */
@@ -556,6 +562,8 @@ function initAppData() {
     dataListenerAttached = true;
 
     seedIfEmpty();
+
+    db.ref('.info/serverTimeOffset').on('value', (snap) => { serverTimeOffset = snap.val() || 0; });
 
     db.ref('locations').on('value', (snapshot) => {
         const data = snapshot.val() || {};
@@ -622,6 +630,12 @@ function initAppData() {
             renderRooms();
         }
     }, 1000);
+
+    // Status gateway (online/offline) dinilai dari umur lastSeen, jadi perlu dicek ulang walau data tidak berubah
+    setInterval(() => {
+        renderSummary();
+        renderRooms();
+    }, 10000);
 }
 
 /* ===== MIGRASI: skema lama -> skema ringkas locations/{cabang}/{lantai}/{gateway}/Kamar {n} ===== */
@@ -1056,6 +1070,82 @@ function getRoomsArray() {
         .sort((a, b) => a.number - b.number);
 }
 
+/* ===== STATUS GATEWAY & DOORLOCK (dilaporkan firmware gateway) ===== */
+function formatTime(ms) {
+    return new Date(ms).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatAgo(ms) {
+    const sec = Math.max(0, Math.round(ms / 1000));
+    if (sec < 60) return `${sec} detik lalu`;
+    if (sec < 3600) return `${Math.round(sec / 60)} menit lalu`;
+    return `${Math.round(sec / 3600)} jam lalu`;
+}
+
+/* state: 'unknown' (firmware belum pernah melapor), 'online', atau 'offline' */
+function getGatewayStatus() {
+    const st = locationsData[currentLoc]?.[currentFloor]?.[currentGw]?.gatewayStatus;
+    if (!st || !st.lastSeen) return { state: 'unknown' };
+    const age = Date.now() + serverTimeOffset - st.lastSeen;
+    return { ...st, age, state: age < GATEWAY_OFFLINE_MS ? 'online' : 'offline' };
+}
+
+function renderGatewayStatusLine() {
+    const gs = getGatewayStatus();
+    if (gs.state === 'unknown') {
+        return `<div class="gs-status unknown"><span class="dot"></span>Gateway belum pernah mengirim status (firmware belum terpasang atau belum tersambung)</div>`;
+    }
+    if (gs.state === 'offline') {
+        return `<div class="gs-status offline"><span class="dot"></span><div><b>Gateway terputus</b> sejak ${formatTime(gs.lastSeen)} (${formatAgo(gs.age)}).
+            <div class="gs-status-detail">Kemungkinan jaringan WiFi/internet gateway terputus atau listrik gateway mati. Status doorlock di bawah tidak diperbarui.</div></div></div>`;
+    }
+    const details = [];
+    const dayMs = 24 * 3600 * 1000;
+    const now = Date.now() + serverTimeOffset;
+    if (gs.lastDisconnectReason && gs.lastReconnectAt && now - gs.lastReconnectAt < dayMs) {
+        details.push(`Terakhir terputus ${formatTime(gs.lastReconnectAt - (gs.lastDisconnectSeconds || 0) * 1000)} selama ${gs.lastDisconnectSeconds || 0} detik: ${gs.lastDisconnectReason}`);
+    }
+    if (gs.lastRestartReason && gs.lastRestartAt && now - gs.lastRestartAt < dayMs) {
+        details.push(`Menyala sejak ${formatTime(gs.lastRestartAt)}: ${gs.lastRestartReason}`);
+    }
+    return `<div class="gs-status online"><span class="dot"></span><div><b>Gateway tersambung</b> · data terakhir ${formatAgo(gs.age)}
+        ${details.map(d => `<div class="gs-status-detail">${d}</div>`).join('')}</div></div>`;
+}
+
+/* Indikator baterai + koneksi doorlock di kartu kamar */
+function renderDeviceStatus(r, gatewayState) {
+    const hasData = r.battery !== undefined || r.connection !== undefined;
+    if (!hasData) return `<div class="room-device muted">Belum ada data dari doorlock</div>`;
+
+    let battery = '';
+    if (typeof r.battery === 'number') {
+        const level = r.battery <= BATTERY_LOW ? 'low' : r.battery <= 50 ? 'mid' : 'high';
+        battery = `
+            <span class="battery ${level}" title="Baterai doorlock ${r.battery}%">
+                <span class="battery-body"><span class="battery-fill" style="width:${Math.max(0, Math.min(100, r.battery))}%"></span></span>
+                <span class="battery-text">${r.battery === 0 ? 'Habis' : r.battery + '%'}</span>
+            </span>`;
+    }
+
+    let connection;
+    let reason = '';
+    if (gatewayState !== 'online') {
+        connection = `<span class="badge conn-unknown">Status tidak diketahui</span>`;
+        reason = gatewayState === 'offline' ? 'Gateway terputus, status doorlock tidak diperbarui' : '';
+    } else if (r.connection === 'connected') {
+        connection = `<span class="badge conn-on">Tersambung</span>`;
+    } else {
+        connection = `<span class="badge conn-off">Terputus</span>`;
+        reason = r.connectionReason || 'Penyebab tidak diketahui';
+    }
+
+    return `
+        <div class="room-device">
+            <div class="room-device-row">${battery}${connection}</div>
+            ${reason ? `<div class="room-device-reason">${reason}</div>` : ''}
+        </div>`;
+}
+
 /* ===== RENDER: Ringkasan Gateway ===== */
 function renderSummary() {
     if (!currentLoc || !currentFloor || !currentGw) { gatewaySummary.innerHTML = ''; return; }
@@ -1074,6 +1164,7 @@ function renderSummary() {
             <div class="gs-stat"><div class="gs-stat-num alert">${unlockedCount}</div><div class="gs-stat-label">Terbuka</div></div>
             <div class="gs-stat"><div class="gs-stat-num alert">${rfidBlockedCount}</div><div class="gs-stat-label">RFID Blokir</div></div>
         </div>
+        ${renderGatewayStatusLine()}
     `;
 }
 
@@ -1097,6 +1188,7 @@ function renderRooms() {
     if (rooms.length === 0) {
         roomList.innerHTML = `<p style="color:var(--text-muted); font-size:13px; grid-column:1/-1;">Belum ada kamar ditambahkan</p>`;
     } else {
+        const gatewayState = getGatewayStatus().state;
         roomList.innerHTML = rooms.map(r => {
             let lockBtnLabel = 'Buka';
             let lockBtnDisabled = '';
@@ -1120,6 +1212,7 @@ function renderRooms() {
                         </div>
                     </div>
                 </div>
+                ${renderDeviceStatus(r, gatewayState)}
                 <div class="room-actions">
                     <button class="icon-btn" data-action="toggle-lock" data-number="${r.number}" ${lockBtnDisabled}>
                         ${lockBtnLabel}
@@ -1324,6 +1417,7 @@ document.getElementById('modalSave').addEventListener('click', () => {
         const existing = getRoomsArray().find(r => r.number === editingRoomNumber);
         const updated = { tenant: newTenant, rfidAccess: newRfid, status: existing?.status || 'locked' };
         if (existing?.doorlockMac) updated.doorlockMac = existing.doorlockMac;
+        DEVICE_STATUS_FIELDS.forEach(f => { if (existing?.[f] !== undefined) updated[f] = existing[f]; });
         writePromise = editingRoomNumber !== newNumber
             ? db.ref(`${basePath}/${roomKey(editingRoomNumber)}`).remove().then(() => db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated))
             : db.ref(`${basePath}/${roomKey(newNumber)}`).set(updated);
