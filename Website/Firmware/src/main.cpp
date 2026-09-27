@@ -13,9 +13,10 @@
 
 #define DATABASE_URL     "https://isk-house-default-rtdb.asia-southeast1.firebasedatabase.app"
 
-// Path node gateway di database. Isi untuk gateway yang dibuat manual dari dashboard (tanpa gatewayMac);
-// kosongkan ("") supaya gateway mencari sendiri lewat gatewayMac hasil klasifikasi admin.
-#define GATEWAY_PATH     "locations/ISK House Kemayoran - Gg H Abdullah No34, RT9RW9, Utan Panja/Lantai 1/Gateway 1"
+// Path node gateway di database. Kosong ("") = gateway mencari sendiri node yang gatewayMac-nya sama dengan MAC-nya;
+// kalau belum ada, gateway mendaftar ke pendingGateways dan muncul di website untuk diklasifikasikan admin.
+// Isi path lengkap hanya untuk gateway yang node-nya dibuat manual dari dashboard (tanpa gatewayMac).
+#define GATEWAY_PATH     ""
 
 #define MAX_ROOMS           20      // sama dengan MAX_ROOMS di Website/main.js
 #define DISCOVERY_RETRY_MS  15000   // jeda cek ulang apakah gateway sudah diklasifikasikan admin
@@ -34,9 +35,9 @@
 
 // Doorlock dummy: disimulasikan otomatis sejak gateway menyala (tanpa perintah "sim"), mengirim data baterai
 // tiap HEARTBEAT_INTERVAL_MS. Nilai baterai diinput manual lewat Serial Monitor ("battery 101 75").
-// Kosongkan ("") untuk mematikan.
-#define DUMMY_ROOMS           "101"  // nomor kamar, pisahkan dengan koma, mis. "101,102"
-#define DUMMY_BATTERY         100    // baterai awal doorlock dummy (%)
+// Kamar yang ditambahkan dari website saat gateway menyala juga langsung dapat dummy.
+#define DUMMY_ROOMS           "*"    // "*" = semua kamar, atau nomor kamar dipisah koma ("101,102"), "" = mati
+#define DUMMY_BATTERY         100    // baterai awal dummy kalau kamar belum punya data baterai di Firebase (%)
 
 /* Struktur database (history tidak disimpan di Firebase, hanya di localStorage website):
    locations/{cabang}/{lantai}/{gateway}/gatewayMac (opsional)
@@ -186,6 +187,11 @@ String dbPath(const String &path) {
     }
   }
   return out;
+}
+
+// Library Firebase menganggap node yang belum ada sebagai error "path not exist", bukan data kosong
+bool pathNotExist() {
+  return fbdo.httpCode() == FIREBASE_ERROR_PATH_NOT_EXIST;
 }
 
 void printFirebaseError(const char *context) {
@@ -412,9 +418,10 @@ bool discoverGatewayPath() {
 // Daftarkan diri ke pendingGateways supaya muncul di panel admin "Gateway Menunggu Klasifikasi"
 void registerPendingGateway() {
   String path = "pendingGateways/" + gatewayMac;
-  if (!Firebase.RTDB.get(&fbdo, path)) { printFirebaseError("Cek pendingGateways"); return; }
+  bool found = Firebase.RTDB.get(&fbdo, path);
+  if (!found && !pathNotExist()) { printFirebaseError("Cek pendingGateways"); return; }
 
-  if (fbdo.dataType() != "null") {
+  if (found && fbdo.dataType() != "null") {
     pendingRegistered = true;  // sudah terdaftar sebelumnya, pairedAt lama dipertahankan
     return;
   }
@@ -448,6 +455,7 @@ void copyRuntimeState(Room &dst, const Room &src) {
 }
 
 bool isDummyRoom(const String &key) {
+  if (strcmp(DUMMY_ROOMS, "*") == 0) return true;
   String list = String(DUMMY_ROOMS) + ",";
   for (int start = 0, comma; (comma = list.indexOf(',', start)) >= 0; start = comma + 1) {
     String number = list.substring(start, comma);
@@ -460,7 +468,7 @@ bool isDummyRoom(const String &key) {
 void startSimulation(Room &r, bool dummy) {
   r.simActive = true;
   r.simSignal = true;
-  r.simBattery = DUMMY_BATTERY;
+  r.simBattery = r.battery >= 0 ? r.battery : DUMMY_BATTERY;  // lanjut dari baterai terakhir di Firebase
   r.simLastBeatAt = 0;
   r.simRelockAt = 0;
   Serial.printf("[SIM] %s doorlock %s dimulai (baterai %d%%), kirim data tiap %d detik. Ubah baterai: battery %s <0-100>\n",
@@ -471,10 +479,11 @@ void startSimulation(Room &r, bool dummy) {
 // Baca ulang seluruh node gateway (kecil, tanpa history), bandingkan dengan data lama, kirim perintah bila berubah.
 // Kamar = semua child berbentuk object (gatewayMac/createdAt otomatis terlewati), sama seperti getRooms() di website.
 void refreshRooms() {
-  if (!Firebase.RTDB.get(&fbdo, dbPath(gatewayPath))) { printFirebaseError("Baca node gateway"); return; }
+  bool found = Firebase.RTDB.get(&fbdo, dbPath(gatewayPath));
+  if (!found && !pathNotExist()) { printFirebaseError("Baca node gateway"); return; }
 
   JsonDocument doc;
-  if (fbdo.dataType() != "json" || deserializeJson(doc, fbdo.payload())) {
+  if (!found || fbdo.dataType() != "json" || deserializeJson(doc, fbdo.payload())) {
     if (useFixedPath) {
       Serial.printf("[GATEWAY] Node %s tidak ditemukan/kosong.\n", gatewayPath.c_str());
       roomCount = 0;
@@ -812,7 +821,7 @@ void printHelp() {
   Serial.println("  rfid 101 block           blokir kartu RFID Kamar 101");
   Serial.println("  rfid 101 allow           izinkan kartu RFID Kamar 101");
   Serial.println("Simulasi doorlock:");
-  Serial.println("  sim 101                  mulai simulasi doorlock Kamar 101 (dummy DUMMY_ROOMS aktif otomatis)");
+  Serial.println("  sim 101                  mulai simulasi doorlock Kamar 101 (dummy aktif otomatis, DUMMY_ROOMS)");
   Serial.println("  sim 101 stop             hentikan simulasi doorlock Kamar 101");
   Serial.println("  battery 101 75           input manual baterai (0 = habis & doorlock mati, isi lagi = menyala)");
   Serial.println("  signal 101 off / on      putus / sambung sinyal doorlock (terputus terdeteksi setelah 15 detik)");
@@ -934,8 +943,17 @@ void setup() {
     Serial.print(".");
     delay(500);
     if (attempt % 20 == 0) {
-      Serial.printf("\nBelum tersambung (status %d), mencoba ulang", WiFi.status());
+      Serial.printf("\nBelum tersambung (status %d).", WiFi.status());
       WiFi.disconnect();
+      // Cek apakah WiFi tujuan terlihat oleh board ini, supaya penyebab gagal tersambung kelihatan
+      int found = WiFi.scanNetworks();
+      int rssi = 0;
+      for (int i = 0; i < found; i++) {
+        if (WiFi.SSID(i) == WIFI_SSID) rssi = WiFi.RSSI(i);
+      }
+      if (rssi) Serial.printf(" WiFi \"%s\" terlihat (sinyal %d dBm), mencoba ulang", WIFI_SSID, rssi);
+      else Serial.printf(" WiFi \"%s\" TIDAK terlihat dari %d jaringan, mencoba ulang", WIFI_SSID, found);
+      WiFi.scanDelete();
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
   }
@@ -948,7 +966,7 @@ void setup() {
   esp_now_register_recv_cb(onReceive);
 
   prefs.begin("gateway", false);
-  gatewayPath = useFixedPath ? String(GATEWAY_PATH) : prefs.getString("path", "");
+  gatewayPath = useFixedPath ? String(GATEWAY_PATH) : (prefs.isKey("path") ? prefs.getString("path") : String(""));
 
   // Database secret (legacy token) = akses penuh ke database tanpa akun email, melewati Rules
   fbConfig.database_url = DATABASE_URL;
